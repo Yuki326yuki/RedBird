@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdg-policy-extract"
+version = "0.1.0"
+description = "Local policy document extraction framework for SDG-related records."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Red Bird" }]
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4.0.0"]
+local = ["transformers>=4.40.0", "torch>=2.0.0"]
+yaml = ["PyYAML>=6.0.0"]
+dev = ["pytest>=8.0.0"]
+app = ["streamlit>=1.36.0"]
+
+[project.scripts]
+sdg-extract = "sdg_extract.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

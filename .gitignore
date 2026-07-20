@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS and editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets and local environment
+.env
+.env.*
+*.key
+*.pem
+
+# Runtime data and generated artifacts
+data/db/
+data/work/*
+data/output/*
+!data/work/.gitkeep
+!data/output/.gitkeep
+
+# Downloaded source documents can be large and should be regenerated from manifests.
+data/sdg13_policy_collection/original_documents/
+data/sdg13_policy_collection/**/*.pdf
+data/sdg13_policy_collection/**/*.html
+data/sdg13_policy_collection/**/*.htm
+
+# Model and parser debug output
+data/work/model_parse_failures/
+
+# Local model files
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth

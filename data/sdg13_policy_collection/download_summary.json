@@ -1,0 +1,7 @@
+{
+  "backup": "data/sdg13_policy_collection/download_manifest.raw.csv",
+  "bytes_on_disk": 1032648916,
+  "clean_manifest_rows": 155,
+  "files_on_disk": 155,
+  "manifest": "data/sdg13_policy_collection/download_manifest.csv"
+}

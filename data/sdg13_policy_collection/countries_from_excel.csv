@@ -1,0 +1,21 @@
+country,iso3,income_group,slug,documents,targets,litigation_cases,source_url,access_date
+United States,USA,High-income,united-states-of-america,43,0,348,https://climate-laws.org/geographies/united-states-of-america,2026-06-18
+Germany,DEU,High-income,germany,20,9,6,https://climate-laws.org/geographies/germany,2026-06-18
+Japan,JPN,High-income,japan,24,19,7,https://climate-laws.org/geographies/japan,2026-06-18
+United Kingdom,GBR,High-income,united-kingdom,39,37,146,https://climate-laws.org/geographies/united-kingdom,2026-06-18
+Canada,CAN,High-income,canada,45,10,44,https://climate-laws.org/geographies/canada,2026-06-18
+China,CHN,Upper-middle,china,55,32,2,https://climate-laws.org/geographies/china,2026-06-18
+Brazil,BRA,Upper-middle,brazil,35,8,50,https://climate-laws.org/geographies/brazil,2026-06-18
+South Africa,ZAF,Upper-middle,south-africa,13,10,9,https://climate-laws.org/geographies/south-africa,2026-06-18
+Mexico,MEX,Upper-middle,mexico,20,9,15,https://climate-laws.org/geographies/mexico,2026-06-18
+Indonesia,IDN,Upper-middle,indonesia,18,10,3,https://climate-laws.org/geographies/indonesia,2026-06-18
+India,IND,Lower-middle,india,54,11,21,https://climate-laws.org/geographies/india,2026-06-18
+Vietnam,VNM,Lower-middle,vietnam,17,7,0,https://climate-laws.org/geographies/vietnam,2026-06-18
+Philippines,PHL,Lower-middle,philippines,16,10,4,https://climate-laws.org/geographies/philippines,2026-06-18
+Egypt,EGY,Lower-middle,egypt,12,15,1,https://climate-laws.org/geographies/egypt,2026-06-18
+Kenya,KEN,Lower-middle,kenya,13,8,3,https://climate-laws.org/geographies/kenya,2026-06-18
+Ethiopia,ETH,Low-income,ethiopia,14,11,0,https://climate-laws.org/geographies/ethiopia,2026-06-18
+Uganda,UGA,Low-income,uganda,13,11,2,https://climate-laws.org/geographies/uganda,2026-06-18
+Mozambique,MOZ,Low-income,mozambique,7,8,0,https://climate-laws.org/geographies/mozambique,2026-06-18
+Nepal,NPL,Low-income,nepal,9,3,1,https://climate-laws.org/geographies/nepal,2026-06-18
+Madagascar,MDG,Low-income,madagascar,10,3,0,https://climate-laws.org/geographies/madagascar,2026-06-18

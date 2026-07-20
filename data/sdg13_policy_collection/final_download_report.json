@@ -1,0 +1,30 @@
+{
+  "countries": 20,
+  "files": 155,
+  "bytes": 1032648916,
+  "manifest_rows": 155,
+  "manifest_rows_missing_document_title": 1,
+  "failure_log_rows": 25,
+  "country_counts": {
+    "brazil": 10,
+    "canada": 13,
+    "china": 11,
+    "egypt": 8,
+    "ethiopia": 3,
+    "germany": 8,
+    "india": 7,
+    "indonesia": 8,
+    "japan": 6,
+    "kenya": 5,
+    "madagascar": 5,
+    "mexico": 13,
+    "mozambique": 6,
+    "nepal": 8,
+    "philippines": 6,
+    "south-africa": 4,
+    "uganda": 6,
+    "united-kingdom": 9,
+    "united-states-of-america": 9,
+    "vietnam": 10
+  }
+}

@@ -1,0 +1,79 @@
+paths:
+  input_dir: data/sdg13_policy_collection/original_documents
+  workdir: data/work/sdg13_china_us/local_100_strict_qwen3_32b_translate32b
+  output_dir: data/output/sdg13_china_us/local_100_strict_qwen3_32b_translate32b
+  prompt_dir: prompts/sdg13_strict
+
+manifest_path: data/sdg13_policy_collection/download_manifest.csv
+countries:
+  - China
+  - United States
+
+experiment:
+  max_chunks: 100
+  sdg13_filter: true
+  strict_sdg13: true
+  balance_by: country_file
+
+chunking:
+  max_chars: 6000
+  overlap_paragraphs: 0
+
+model:
+  backend: local_transformers
+  name: Qwen3-32B
+  api_base: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  temperature: 0
+  max_tokens: 2500
+  json_mode: true
+  local_model_path: /hpc2hdd/home/czhang162/models/Qwen3-32B
+  torch_dtype: auto
+  use_chat_template: true
+  enable_thinking: false
+
+review:
+  enabled: true
+  stage: chunk_record
+  prompt_path: prompts/review/sdg13_strict.md
+  cache_path: reviews.jsonl
+  keep_rejected: false
+  model:
+    backend: local_transformers
+    name: Qwen3-32B
+    local_model_path: /hpc2hdd/home/czhang162/models/Qwen3-32B
+    temperature: 0
+    max_tokens: 2500
+    torch_dtype: auto
+    use_chat_template: true
+    enable_thinking: false
+
+translation:
+  enabled: true
+  output_language: English
+  prompt_path: prompts/translation/en_policy.md
+  cache_path: translations.jsonl
+  model:
+    backend: local_transformers
+    name: Qwen3-32B
+    temperature: 0
+    max_tokens: 4000
+    json_mode: true
+    local_model_path: /hpc2hdd/home/czhang162/models/Qwen3-32B
+    torch_dtype: auto
+    use_chat_template: true
+    enable_thinking: false
+
+chatbot:
+  enabled: true
+  db_path: data/db/redbird_sdg13.sqlite
+  prompt_path: prompts/chatbot/policy_qa.md
+  top_k: 6
+  model:
+    backend: api
+    name: gpt-4.1-mini
+    api_base: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    temperature: 0
+    max_tokens: 1500
+    json_mode: false

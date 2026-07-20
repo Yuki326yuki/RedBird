@@ -1,0 +1,424 @@
+[
+  {
+    "access_date": "2026-06-18",
+    "country": "United States",
+    "documents": 43,
+    "income_group": "High-income",
+    "iso3": "USA",
+    "litigation_cases": 348,
+    "recent_documents": [
+      "United States Mid-Century Strategy for Deep Decarbonization",
+      "United States 2024 Biennial Transparency Report",
+      "New Source Performance Standards for Greenhouse Gas Emissions from New, Modified, and Reconstructed Fossil Fuel-Fired Electric Generating Units"
+    ],
+    "slug": "united-states-of-america",
+    "source_url": "https://climate-laws.org/geographies/united-states-of-america",
+    "target_keywords": [
+      "net-zero by 2050",
+      "2035 power sector carbon pollution standards",
+      "economy-wide emission reductions"
+    ],
+    "targets": 0
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Germany",
+    "documents": 20,
+    "income_group": "High-income",
+    "iso3": "DEU",
+    "litigation_cases": 6,
+    "recent_documents": [
+      "Federal Climate Change Act",
+      "Climate Action Programme 2030",
+      "Climate Action Plan 2050",
+      "The Energy Concept and its Accelerated Implementation"
+    ],
+    "slug": "germany",
+    "source_url": "https://climate-laws.org/geographies/germany",
+    "target_keywords": [
+      "net greenhouse gas neutrality by 2045",
+      "65% reduction by 2030",
+      "88% reduction by 2040"
+    ],
+    "targets": 9
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Japan",
+    "documents": 24,
+    "income_group": "High-income",
+    "iso3": "JPN",
+    "litigation_cases": 7,
+    "recent_documents": [
+      "Japan's National Greenhouse Gas Emission Reduction Target for 2035 and 2040",
+      "Bill for the Act on Promotion of Supply and Utilisation of Low-Carbon Hydrogen",
+      "Bill on Carbon Dioxide Storage Business"
+    ],
+    "slug": "japan",
+    "source_url": "https://climate-laws.org/geographies/japan",
+    "target_keywords": [
+      "60% emission reduction by 2035",
+      "73% emission reduction by 2040",
+      "net zero by 2050"
+    ],
+    "targets": 19
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "United Kingdom",
+    "documents": 39,
+    "income_group": "High-income",
+    "iso3": "GBR",
+    "litigation_cases": 146,
+    "recent_documents": [
+      "The Carbon Budget Order 2021",
+      "Net Zero Strategy: Build Back Greener",
+      "Powering Up Britain",
+      "UK Climate Change Act 2008"
+    ],
+    "slug": "united-kingdom",
+    "source_url": "https://climate-laws.org/geographies/united-kingdom",
+    "target_keywords": [
+      "net zero by 2050",
+      "sixth carbon budget",
+      "power sector decarbonisation"
+    ],
+    "targets": 37
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Canada",
+    "documents": 45,
+    "income_group": "High-income",
+    "iso3": "CAN",
+    "litigation_cases": 44,
+    "recent_documents": [
+      "2030 Emissions Reduction Plan",
+      "Canadian Net-Zero Emissions Accountability Act",
+      "A Healthy Environment and a Healthy Economy"
+    ],
+    "slug": "canada",
+    "source_url": "https://climate-laws.org/geographies/canada",
+    "target_keywords": [
+      "40-45% below 2005 by 2030",
+      "net-zero emissions by 2050",
+      "carbon pricing"
+    ],
+    "targets": 10
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "China",
+    "documents": 55,
+    "income_group": "Upper-middle",
+    "iso3": "CHN",
+    "litigation_cases": 2,
+    "recent_documents": [
+      "China's Nationally Determined Contribution and Long-term Low Greenhouse Gas Emission Development Strategy",
+      "14th Five-Year Plan for Modern Energy System",
+      "Carbon Peak Action Plan before 2030"
+    ],
+    "slug": "china",
+    "source_url": "https://climate-laws.org/geographies/china",
+    "target_keywords": [
+      "peak CO2 before 2030",
+      "carbon neutrality before 2060",
+      "non-fossil energy expansion"
+    ],
+    "targets": 32
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Brazil",
+    "documents": 35,
+    "income_group": "Upper-middle",
+    "iso3": "BRA",
+    "litigation_cases": 50,
+    "recent_documents": [
+      "Brazil's Nationally Determined Contribution",
+      "National Policy on Climate Change",
+      "Amazon Fund and deforestation control plans"
+    ],
+    "slug": "brazil",
+    "source_url": "https://climate-laws.org/geographies/brazil",
+    "target_keywords": [
+      "emission reduction under NDC",
+      "deforestation control",
+      "climate adaptation"
+    ],
+    "targets": 8
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "South Africa",
+    "documents": 13,
+    "income_group": "Upper-middle",
+    "iso3": "ZAF",
+    "litigation_cases": 9,
+    "recent_documents": [
+      "Climate Change Act",
+      "National Climate Change Adaptation Strategy",
+      "Just Energy Transition Investment Plan"
+    ],
+    "slug": "south-africa",
+    "source_url": "https://climate-laws.org/geographies/south-africa",
+    "target_keywords": [
+      "low-emission development",
+      "just energy transition",
+      "carbon budgets"
+    ],
+    "targets": 10
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Mexico",
+    "documents": 20,
+    "income_group": "Upper-middle",
+    "iso3": "MEX",
+    "litigation_cases": 15,
+    "recent_documents": [
+      "General Law on Climate Change",
+      "Special Climate Change Program",
+      "Updated Nationally Determined Contribution"
+    ],
+    "slug": "mexico",
+    "source_url": "https://climate-laws.org/geographies/mexico",
+    "target_keywords": [
+      "emission reduction under NDC",
+      "adaptation measures",
+      "clean energy transition"
+    ],
+    "targets": 9
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Indonesia",
+    "documents": 18,
+    "income_group": "Upper-middle",
+    "iso3": "IDN",
+    "litigation_cases": 3,
+    "recent_documents": [
+      "Enhanced Nationally Determined Contribution",
+      "Long-Term Strategy for Low Carbon and Climate Resilience 2050",
+      "Presidential Regulation on Carbon Economic Value"
+    ],
+    "slug": "indonesia",
+    "source_url": "https://climate-laws.org/geographies/indonesia",
+    "target_keywords": [
+      "enhanced NDC emissions target",
+      "FOLU net sink",
+      "low-carbon and climate resilience"
+    ],
+    "targets": 10
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "India",
+    "documents": 54,
+    "income_group": "Lower-middle",
+    "iso3": "IND",
+    "litigation_cases": 21,
+    "recent_documents": [
+      "India's Updated First Nationally Determined Contribution",
+      "National Action Plan on Climate Change",
+      "Energy Conservation Amendment Act"
+    ],
+    "slug": "india",
+    "source_url": "https://climate-laws.org/geographies/india",
+    "target_keywords": [
+      "45% emissions intensity reduction by 2030",
+      "50% installed electric capacity from non-fossil sources",
+      "net zero by 2070"
+    ],
+    "targets": 11
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Vietnam",
+    "documents": 17,
+    "income_group": "Lower-middle",
+    "iso3": "VNM",
+    "litigation_cases": 0,
+    "recent_documents": [
+      "National Strategy on Climate Change to 2050",
+      "Nationally Determined Contribution 2022",
+      "Power Development Plan VIII"
+    ],
+    "slug": "vietnam",
+    "source_url": "https://climate-laws.org/geographies/vietnam",
+    "target_keywords": [
+      "net zero by 2050",
+      "coal transition",
+      "renewable energy expansion"
+    ],
+    "targets": 7
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Philippines",
+    "documents": 16,
+    "income_group": "Lower-middle",
+    "iso3": "PHL",
+    "litigation_cases": 4,
+    "recent_documents": [
+      "Philippine Nationally Determined Contribution",
+      "National Climate Change Action Plan",
+      "Climate Change Act"
+    ],
+    "slug": "philippines",
+    "source_url": "https://climate-laws.org/geographies/philippines",
+    "target_keywords": [
+      "NDC mitigation commitment",
+      "climate resilience",
+      "disaster risk reduction"
+    ],
+    "targets": 10
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Egypt",
+    "documents": 12,
+    "income_group": "Lower-middle",
+    "iso3": "EGY",
+    "litigation_cases": 1,
+    "recent_documents": [
+      "Egypt National Climate Change Strategy 2050",
+      "Updated Nationally Determined Contribution",
+      "Sustainable Energy Strategy 2035"
+    ],
+    "slug": "egypt",
+    "source_url": "https://climate-laws.org/geographies/egypt",
+    "target_keywords": [
+      "NCCS 2050",
+      "renewable energy",
+      "adaptation and resilience"
+    ],
+    "targets": 15
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Kenya",
+    "documents": 13,
+    "income_group": "Lower-middle",
+    "iso3": "KEN",
+    "litigation_cases": 3,
+    "recent_documents": [
+      "Climate Change Act",
+      "National Climate Change Action Plan",
+      "Updated Nationally Determined Contribution"
+    ],
+    "slug": "kenya",
+    "source_url": "https://climate-laws.org/geographies/kenya",
+    "target_keywords": [
+      "32% GHG reduction by 2030",
+      "climate finance",
+      "adaptation and resilience"
+    ],
+    "targets": 8
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Ethiopia",
+    "documents": 14,
+    "income_group": "Low-income",
+    "iso3": "ETH",
+    "litigation_cases": 0,
+    "recent_documents": [
+      "Ethiopia Updated Nationally Determined Contribution",
+      "Climate Resilient Green Economy Strategy",
+      "National Adaptation Plan"
+    ],
+    "slug": "ethiopia",
+    "source_url": "https://climate-laws.org/geographies/ethiopia",
+    "target_keywords": [
+      "climate resilient green economy",
+      "conditional and unconditional NDC targets",
+      "adaptation"
+    ],
+    "targets": 11
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Uganda",
+    "documents": 13,
+    "income_group": "Low-income",
+    "iso3": "UGA",
+    "litigation_cases": 2,
+    "recent_documents": [
+      "Uganda Updated Nationally Determined Contribution",
+      "National Climate Change Act",
+      "National Climate Change Policy"
+    ],
+    "slug": "uganda",
+    "source_url": "https://climate-laws.org/geographies/uganda",
+    "target_keywords": [
+      "24.7% emissions reduction by 2030",
+      "adaptation priority sectors",
+      "climate governance"
+    ],
+    "targets": 11
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Mozambique",
+    "documents": 7,
+    "income_group": "Low-income",
+    "iso3": "MOZ",
+    "litigation_cases": 0,
+    "recent_documents": [
+      "Mozambique Updated Nationally Determined Contribution",
+      "National Climate Change Adaptation and Mitigation Strategy",
+      "Energy Transition Strategy"
+    ],
+    "slug": "mozambique",
+    "source_url": "https://climate-laws.org/geographies/mozambique",
+    "target_keywords": [
+      "adaptation and mitigation strategy",
+      "renewable energy",
+      "climate resilience"
+    ],
+    "targets": 8
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Nepal",
+    "documents": 9,
+    "income_group": "Low-income",
+    "iso3": "NPL",
+    "litigation_cases": 1,
+    "recent_documents": [
+      "Second Nationally Determined Contribution",
+      "National Climate Change Policy",
+      "Long-term Strategy for Net-zero Emissions"
+    ],
+    "slug": "nepal",
+    "source_url": "https://climate-laws.org/geographies/nepal",
+    "target_keywords": [
+      "net zero by 2045",
+      "electric cooking and transport",
+      "forest cover"
+    ],
+    "targets": 3
+  },
+  {
+    "access_date": "2026-06-18",
+    "country": "Madagascar",
+    "documents": 10,
+    "income_group": "Low-income",
+    "iso3": "MDG",
+    "litigation_cases": 0,
+    "recent_documents": [
+      "Madagascar Nationally Determined Contribution",
+      "National Adaptation Plan",
+      "Climate Change Policy"
+    ],
+    "slug": "madagascar",
+    "source_url": "https://climate-laws.org/geographies/madagascar",
+    "target_keywords": [
+      "adaptation priorities",
+      "mitigation under NDC",
+      "resilience"
+    ],
+    "targets": 3
+  }
+]
