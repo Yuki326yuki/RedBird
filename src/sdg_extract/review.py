@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .io_utils import read_jsonl, write_jsonl
 from .models import ModelBackend
 from .schema import normalize_records
+from .targeting import evidence_is_traceable
 from .types import Chunk
 
 
@@ -29,11 +30,16 @@ class RecordReviewer:
         prompt_path: Path,
         cache_path: Path,
         keep_rejected: bool = False,
+        min_confidence: float = 0.75,
+        enforce_traceable_evidence: bool = False,
     ) -> None:
         self.backend = backend
         self.prompt = prompt_path.read_text(encoding="utf-8").strip()
         self.cache_path = cache_path
         self.keep_rejected = keep_rejected
+        self.min_confidence = float(min_confidence)
+        self.enforce_traceable_evidence = bool(enforce_traceable_evidence)
+        self.prompt_hash = hashlib.sha1(self.prompt.encode("utf-8")).hexdigest()[:12]
         self.cache: Dict[str, Dict[str, Any]] = {}
         if cache_path.exists():
             for row in read_jsonl(cache_path):
@@ -67,6 +73,19 @@ class RecordReviewer:
         cached = self.cache.get(cache_key)
         if cached:
             return self.apply_decision(record, cached), cached
+
+        quote = record.get("evidence_quote")
+        if self.enforce_traceable_evidence and not evidence_is_traceable(chunk.text, quote):
+            review_row = base_review_row(cache_key, chunk, record, self.backend.model_name())
+            review_row.update(
+                {
+                    "decision": "reject",
+                    "review_confidence": 0.0,
+                    "rejection_reason": "evidence_not_traceable",
+                    "revised_record": None,
+                }
+            )
+            return None, review_row
 
         try:
             response = self.backend.complete_json(
@@ -125,7 +144,11 @@ class RecordReviewer:
                 "revised_record": revised_record,
             }
         )
-        if decision == "revise" and not self.valid_revised_record(record, revised_record):
+        if confidence is None or confidence < self.min_confidence:
+            row["decision"] = "reject"
+            row["rejection_reason"] = row.get("rejection_reason") or "review_confidence_below_threshold"
+            row["revised_record"] = None
+        if row["decision"] == "revise" and not self.valid_revised_record(record, revised_record):
             row["decision"] = "reject"
             row["rejection_reason"] = "invalid_revision"
             row["revised_record"] = None
@@ -196,6 +219,7 @@ class RecordReviewer:
                 "chunk_id": chunk.chunk_id,
                 "candidate_record": record,
                 "review_model": self.backend.model_name(),
+                "prompt_hash": self.prompt_hash,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -218,6 +242,9 @@ def base_review_row(
         "chunk_id": chunk.chunk_id,
         "source_file": chunk.source_file,
         "source_filename": record.get("source_filename"),
+        "page_start": chunk.page_start or chunk.evidence_page,
+        "page_end": chunk.page_end,
+        "paragraph_ids": chunk.paragraph_ids,
         "candidate_record": record,
     }
 

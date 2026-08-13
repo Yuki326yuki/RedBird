@@ -10,6 +10,7 @@ from sdg_extract.extraction import (
     filter_strict_sdg13_records,
     is_sdg13_relevant_chunk,
     sanitize_raw_record,
+    select_extraction_chunks,
 )
 from sdg_extract.chunking import chunk_document
 from sdg_extract.io_utils import read_jsonl
@@ -17,6 +18,8 @@ from sdg_extract.models import ModelBackend
 from sdg_extract.models import HeuristicBackend
 from sdg_extract.parsers import parse_file
 from sdg_extract.review import RecordReviewer
+from sdg_extract.quality import target_distribution_report
+from sdg_extract.targeting import SDG13TargetClassifier
 
 
 class ExtractionTests(unittest.TestCase):
@@ -369,6 +372,127 @@ class ExtractionTests(unittest.TestCase):
 
         self.assertEqual(reviewed, [])
         self.assertIn('"stage": "review"', errors_text)
+
+
+    def test_chunk_filter_does_not_use_climate_title_or_path(self):
+        with tempfile.TemporaryDirectory(prefix="climate-policy-") as tmp:
+            policy = Path(tmp) / "climate-plan.txt"
+            policy.write_text("Digital services and elderly care improvements.", encoding="utf-8")
+            document = parse_file(policy, metadata={"policy_title": "National Climate Plan"})
+            chunk = chunk_document(document, max_chars=1000)[0]
+
+            self.assertFalse(is_sdg13_relevant_chunk(chunk))
+
+    def test_chunking_splits_oversized_paragraph_and_adds_overlap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = Path(tmp) / "policy.txt"
+            policy.write_text(("Climate adaptation policy sentence. " * 80), encoding="utf-8")
+            document = parse_file(policy)
+
+            chunks = chunk_document(document, max_chars=500, overlap_chars=100)
+
+            self.assertGreater(len(chunks), 1)
+            self.assertTrue(all(len(chunk.text) <= 570 for chunk in chunks))
+            self.assertTrue(all(chunk.page_start == 1 and chunk.page_end == 1 for chunk in chunks))
+
+    def test_dedupe_keeps_same_evidence_for_different_targets(self):
+        records = [
+            {"source_filename": "a.pdf", "sdg_target": "13.1", "policy_content_original": "Climate resilience training", "evidence_quote": "Climate resilience"},
+            {"source_filename": "a.pdf", "sdg_target": "13.3", "policy_content_original": "Climate resilience training", "evidence_quote": "Climate resilience"},
+        ]
+
+        self.assertEqual(len(dedupe_records(records)), 2)
+
+    def test_target_classifier_requires_target_specific_support(self):
+        class NeverCalledBackend(ModelBackend):
+            def complete_json(self, messages, schema_hint):
+                raise AssertionError("cache-free apply_assessments should not call backend")
+
+            def model_name(self):
+                return "classifier"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "target.md"
+            prompt.write_text("Classify.", encoding="utf-8")
+            policy = root / "policy.txt"
+            policy.write_text("The national climate policy integrates adaptation into planning.", encoding="utf-8")
+            chunk = chunk_document(parse_file(policy), max_chars=1000)[0]
+            classifier = SDG13TargetClassifier(NeverCalledBackend(), prompt, root / "cache.jsonl")
+            candidate = {
+                "policy_content_original": "The national climate policy integrates adaptation into planning.",
+                "evidence_quote": "climate policy integrates adaptation into planning",
+            }
+
+            records = classifier.apply_assessments(
+                chunk,
+                candidate,
+                [
+                    {"sdg_target": "13.1", "decision": "supported", "confidence": 0.9, "evidence_quote": "adaptation", "reason": "adaptation"},
+                    {"sdg_target": "13.2", "decision": "supported", "confidence": 0.92, "evidence_quote": "climate policy integrates adaptation into planning", "reason": "policy integration"},
+                    {"sdg_target": "13.a", "decision": "supported", "confidence": 0.99, "evidence_quote": "climate policy", "reason": "unsupported finance"},
+                ],
+            )
+
+        self.assertEqual({record["sdg_target"] for record in records}, {"13.1", "13.2"})
+
+    def test_strict_filter_rejects_generic_emissions_as_13_2(self):
+        record = valid_candidate_record(Path("generic.pdf"))
+        record["policy_content_original"] = "The facility reduced emissions through routine maintenance."
+        record["evidence_quote"] = "reduced emissions"
+
+        self.assertEqual(filter_strict_sdg13_records([record]), [])
+
+
+    def test_strict_filter_requires_explicit_climate_integration_for_13_2(self):
+        generic = valid_candidate_record(Path("generic-policy.pdf"))
+        generic["policy_content_original"] = "The national energy policy reduces carbon emissions."
+        generic["evidence_quote"] = "energy policy reduces carbon emissions"
+        explicit = valid_candidate_record(Path("climate-plan.pdf"))
+        explicit["policy_content_original"] = "The national climate strategy integrates mitigation into planning."
+        explicit["evidence_quote"] = "national climate strategy"
+
+        filtered = filter_strict_sdg13_records([generic, explicit])
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["source_filename"], explicit["source_filename"])
+
+    def test_strict_filter_rejects_hazard_description_without_adaptation_action(self):
+        record = valid_candidate_record(Path("hazards.pdf"))
+        record["sdg_target"] = "13.1"
+        record["policy_content_original"] = "Climate change causes more frequent extreme weather events."
+        record["evidence_quote"] = "more frequent extreme weather events"
+
+        self.assertEqual(filter_strict_sdg13_records([record]), [])
+
+    def test_target_distribution_report_flags_concentration_without_rebalancing(self):
+        records = [{"country": "China", "sdg_target": "13.2"} for _ in range(9)]
+        records.append({"country": "China", "sdg_target": "13.1"})
+
+        report = target_distribution_report(records)
+
+        self.assertEqual(report["target_counts"]["13.2"], 9)
+        self.assertEqual(report["dominant_share"], 0.9)
+        self.assertTrue(report["warnings"][0].startswith("target_concentration:13.2"))
+
+    def test_multilingual_chunk_filter_accepts_manifest_languages(self):
+        examples = [
+            "La política climática fortalece la adaptación y la resiliencia.",
+            "A política climática reduz as emissões de gases com efeito de estufa.",
+            "La politique climatique renforce l’adaptation et la résilience.",
+            "Die Klimapolitik stärkt Anpassung und Resilienz.",
+            "Chính sách khí hậu tăng cường thích ứng và khả năng chống chịu.",
+            "تعزز سياسة المناخ التكيف والمرونة.",
+            "Kebijakan iklim memperkuat adaptasi dan ketahanan.",
+            "जलवायु नीतिले अनुकूलन र उत्थानशीलता बढाउँछ।",
+            "気候政策は適応とレジリエンスを強化する。",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, text in enumerate(examples):
+                policy = Path(tmp) / f"policy-{index}.txt"
+                policy.write_text(text, encoding="utf-8")
+                chunk = chunk_document(parse_file(policy), max_chars=1000)[0]
+                self.assertTrue(is_sdg13_relevant_chunk(chunk), text)
 
 
 def valid_candidate_record(path: Path) -> dict:

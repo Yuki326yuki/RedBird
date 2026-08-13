@@ -1,493 +1,361 @@
-# Red Bird：SDG 政策提取、审查、翻译与数据库问答工具
+# Red Bird：多语言 SDG 13 政策数据库与智能问答
 
-Red Bird 是一个面向政策文本的本地研究工具链。它可以从本地 PDF、HTML、TXT、DOCX、CSV 等政策文件中提取与 SDG 相关的政策内容，并进一步完成严格审查、政策级聚合、英文翻译、数据库构建、界面浏览和 Chatbot 问答。
+Red Bird 从多国家政策文件中提取与 SDG 13 直接相关的政策措施，完成 target 分类、独立审查、英文翻译、政策级聚合、SQLite 检索和 Chatbot 问答。项目支持保留原文，同时把结果统一翻译为英文，最终形成一份政策一行的数据库主表。
 
-当前项目主要围绕 SDG 13 气候行动实验配置展开，支持中国和美国政策数据的 100 chunk 小规模实验，也可以扩展到更大的政策集合。
+## 数据范围
+
+`data/sdg13_policy_collection/download_manifest.csv` 当前包含 155 条记录、20 个国家：Canada、Mexico、China、Brazil、Vietnam、United Kingdom、United States、Egypt、Germany、Indonesia、Nepal、India、Japan、Mozambique、Philippines、Uganda、Kenya、Madagascar、South Africa 和 Ethiopia。
+
+manifest 中已标注的语言代码包括：
+
+```text
+eng, spa, por, vie, fra, zho, cmn, deu, ara, ind, npi, jpn
+```
+
+另有少量记录未填写语言。程序不会把未标注语言强行推断为某种语言；模型仍会阅读原文并在翻译阶段生成英文列。
 
 ## 主要功能
 
-- 文档摄入：读取本地政策文件，解析为标准化 `documents.jsonl` 和 `chunks.jsonl`。
-- chunk 级抽取：将长政策文件切分为 chunk，再调用模型抽取 SDG 相关政策记录。
-- SDG13 严格过滤：仅保留明确涉及气候行动的内容。
-- 双阶段审查：抽取后使用独立审查 prompt 判断记录是否真正支持 SDG 13 与具体 target。
-- policy-level 聚合：最终导出为“一份政策文件一行”，更适合数据库使用。
-- 英文翻译：将政策标题、政策内容、政策摘要统一翻译为英文。
-- SQLite 数据库：将最终 `records.jsonl/csv` 导入 SQLite，并建立 FTS5 全文检索索引。
-- 本地界面：使用 Streamlit 浏览、筛选、搜索和导出政策表。
-- Chatbot：基于数据库检索结果回答用户问题，并显示引用来源。
+- 解析 PDF、HTML、TXT、DOCX 和 CSV，记录页码、段落及解析质量。
+- 将长文档切为带重叠的 chunk，超长段落继续按句子拆分。
+- 使用多语言 SDG 13 关键词进行低成本候选召回，不使用文件名或标题冒充正文证据。
+- 将政策措施抽取、五个 target 分类和最终审查拆成独立步骤。
+- 支持同一政策对应多个 target，不再强制选择一个 target。
+- 将通过审查的 chunk 记录聚合成一份政策一行，并统一翻译为英文。
+- 建立 `policies + passages + policy_targets` SQLite 数据库和 FTS5 索引。
+- 使用多语言别名、结构化 SQL、原文/英文 FTS、翻译桥接、查询扩展和 Luna 重排进行检索。
+- 提供 Streamlit 数据浏览器和具备数据库知识的通用 Chatbot。
 
-## 环境准备
+## 快速开始
 
-推荐使用已经创建好的 conda 环境：
+下面提供三种运行方式。第一次使用建议先运行 100-chunk 实验，确认结果后再扩展到全量。
+
+### 第一步：进入环境
 
 ```bash
 conda activate redbird
 cd "/hpc2hdd/home/czhang162/MyProject/Red Bird"
-```
-
-如果没有激活环境，也可以使用 `conda run`：
-
-```bash
-conda run -n redbird env PYTHONPATH=src python -m sdg_extract.cli --help
-```
-
-项目本地运行时通常需要设置：
-
-```bash
+python -m pip install -e ".[pdf,yaml,dev,local,app]"
 export PYTHONPATH=src
 ```
 
-如果要使用 API 模型或 Chatbot，需要设置 API key：
+安装只需要执行一次。以后重新登录服务器时，只需要重新执行 `conda activate`、`cd` 和 `export PYTHONPATH=src`。
+
+### 第二步：选择运行模式
+
+可选择以下任意一种模式：
+
+- 本地 32B：抽取、分类、审查和翻译都使用本地 `Qwen3-32B`，不消耗 API。
+- API 中美实验：使用 `gpt-5.6-luna` 处理中国和美国数据。
+- API 多国家实验：使用 `gpt-5.6-luna` 对 20 个国家均衡抽取 100 个候选 chunk。
+
+不要同时运行多个模式。每种模式使用独立目录，不会覆盖其他实验结果。
+
+### 模式 A：本地 Qwen3-32B
+
+适合在有足够显存的 GPU 服务器上运行。完整流程只需要执行：
 
 ```bash
-export OPENAI_API_KEY="你的 API key"
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src \
+python -m sdg_extract.cli pipeline \
+  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_v2.yaml
 ```
 
-## 配置文件说明
-
-常用配置位于 `configs/`：
-
-- `configs/default.yaml`：默认 API 模式配置。
-- `configs/local.yaml`：本地模型配置。
-- `configs/sdg13_china_us_local.yaml`：中美 SDG13 本地模型实验配置。
-- `configs/sdg13_china_us_local_100.yaml`：中美 100 chunk 测试配置。
-- `configs/sdg13_china_us_local_100_strict.yaml`：中美 100 chunk 严格 SDG13 配置。
-- `configs/sdg13_china_us_local_100_strict_qwen25_7b.yaml`：使用 Qwen2.5-7B 的严格测试配置。
-- `configs/sdg13_china_us_local_100_strict_qwen3_32b_translate32b.yaml`：使用 Qwen3-32B 抽取、审查和翻译的完整实验配置。
-
-当前推荐的完整流程配置是：
+该命令会依次完成：
 
 ```text
-configs/sdg13_china_us_local_100_strict_qwen3_32b_translate32b.yaml
+PDF 解析 -> chunk 筛选 -> 政策证据抽取 -> 五个 target 独立分类
+-> 独立审查 -> 政策级聚合 -> 英文翻译 -> CSV/JSONL -> SQLite
 ```
 
-该配置包含：
+本地模式不需要 `OPENAI_API_KEY`。只有之后使用 Chatbot 时才需要 API 密钥。
 
-- 输入目录：`data/sdg13_policy_collection/original_documents`
-- 工作目录：`data/work/sdg13_china_us/local_100_strict_qwen3_32b_translate32b`
-- 输出目录：`data/output/sdg13_china_us/local_100_strict_qwen3_32b_translate32b`
-- 抽取模型：`/hpc2hdd/home/czhang162/models/Qwen3-32B`
-- 审查模型：`/hpc2hdd/home/czhang162/models/Qwen3-32B`
-- 翻译模型：`/hpc2hdd/home/czhang162/models/Qwen3-32B`
-- Chatbot 模型：OpenAI-compatible API，默认 `gpt-4.1-mini`
+本地模式结果位置：
 
-## 基础命令
-
-查看所有 CLI 命令：
-
-```bash
-PYTHONPATH=src python -m sdg_extract.cli --help
+```text
+data/output/sdg13_china_us/local_100_strict_qwen3_32b_v2/records.csv
+data/output/sdg13_china_us/local_100_strict_qwen3_32b_v2/records.jsonl
+data/db/redbird_sdg13_qwen3_32b_v2.sqlite
 ```
 
-当前支持：
+质量和日志位置：
 
-- `ingest`：解析本地文档。
-- `extract`：执行抽取、过滤和审查。
-- `export`：导出 policy-level JSONL/CSV，并可执行翻译。
-- `db-build`：从最终导出结果构建 SQLite 数据库。
-- `db-query`：在命令行中测试数据库检索。
-
-## 运行完整 32B 严格实验
-
-进入项目目录：
-
-```bash
-cd "/hpc2hdd/home/czhang162/MyProject/Red Bird"
+```text
+data/work/sdg13_china_us/local_100_strict_qwen3_32b_v2/quality_report.json
+data/work/sdg13_china_us/local_100_strict_qwen3_32b_v2/target_classifications.jsonl
+data/work/sdg13_china_us/local_100_strict_qwen3_32b_v2/reviews.jsonl
+data/work/sdg13_china_us/local_100_strict_qwen3_32b_v2/errors.jsonl
 ```
 
-执行抽取和审查：
+### 模式 B：API 中美实验
+
+API 模式的抽取、分类、审查和翻译都调用 OpenLux，不占用本地 GPU。
+
+先在当前终端设置密钥：
 
 ```bash
-conda run --no-capture-output -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli extract \
-  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_translate32b.yaml
+export OPENAI_API_KEY="你的 API 密钥"
 ```
 
-执行导出和英文翻译：
+不要把真实密钥写入 YAML、README 或提交到 Git。然后运行：
 
 ```bash
-conda run --no-capture-output -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli export \
-  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_translate32b.yaml \
+PYTHONPATH=src python -m sdg_extract.cli pipeline \
+  --config configs/sdg13_china_us_gpt56_luna_v2.yaml
+```
+
+API 配置为：
+
+```text
+模型：gpt-5.6-luna
+地址：https://api.openlux.ai/v1
+密钥变量：OPENAI_API_KEY
+```
+
+中美 API 结果位置：
+
+```text
+data/output/sdg13_china_us/gpt56_luna_v2_100/records.csv
+data/output/sdg13_china_us/gpt56_luna_v2_100/records.jsonl
+data/db/redbird_sdg13_v2.sqlite
+```
+
+### 模式 C：API 多国家实验
+
+该模式读取 manifest 中全部 20 个国家，并按国家、文件和 target 通道均衡选择 100 个候选 chunk：
+
+```bash
+export OPENAI_API_KEY="你的 API 密钥"
+
+PYTHONPATH=src python -m sdg_extract.cli pipeline \
+  --config configs/sdg13_all_countries_gpt56_luna_v2_100.yaml
+```
+
+多国家 API 结果位置：
+
+```text
+data/output/sdg13_all_countries/gpt56_luna_v2_100/records.csv
+data/output/sdg13_all_countries/gpt56_luna_v2_100/records.jsonl
+data/db/redbird_sdg13_all_countries_v2.sqlite
+```
+
+### 分步运行
+
+通常直接运行 `pipeline` 即可。如果需要定位错误，可以分成三步。下面以本地 32B 为例。
+
+第一步，抽取、target 分类和审查：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src \
+python -m sdg_extract.cli extract \
+  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_v2.yaml
+```
+
+第二步，政策级聚合、英文翻译和导出：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src \
+python -m sdg_extract.cli export \
+  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_v2.yaml \
   --format jsonl,csv
 ```
 
-最终输出位于：
+第三步，构建 SQLite 数据库：
 
-```text
-data/output/sdg13_china_us/local_100_strict_qwen3_32b_translate32b/records.jsonl
-data/output/sdg13_china_us/local_100_strict_qwen3_32b_translate32b/records.csv
+```bash
+PYTHONPATH=src python -m sdg_extract.cli db-build \
+  --input data/output/sdg13_china_us/local_100_strict_qwen3_32b_v2/records.jsonl \
+  --passages data/work/sdg13_china_us/local_100_strict_qwen3_32b_v2/records.jsonl \
+  --db data/db/redbird_sdg13_qwen3_32b_v2.sqlite \
+  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_v2.yaml
 ```
 
-中间文件位于：
+API 模式也可以分步运行，只需把三条命令中的 `--config` 换成对应 API 配置，并提前设置 `OPENAI_API_KEY`。
 
-```text
-data/work/sdg13_china_us/local_100_strict_qwen3_32b_translate32b/
+### 启动数据库界面和 Chatbot
+
+无论政策数据由本地模型还是 API 生成，Interface 的启动方式相同。Chatbot 使用 OpenLux API，因此需要先设置密钥：
+
+```bash
+export OPENAI_API_KEY="你的 API 密钥"
+
+conda run --no-capture-output -n redbird env PYTHONPATH=src \
+streamlit run app/redbird_interface.py
 ```
 
-重要中间文件：
+浏览器访问：
 
-- `documents.jsonl`：解析后的文档。
-- `chunks.jsonl`：切分后的 chunk。
-- `records.jsonl`：通过审查后的 chunk-level 抽取记录。
-- `reviews.jsonl`：审查日志，包括 accept、revise、reject。
-- `translations.jsonl`：翻译缓存。
+```text
+http://localhost:8501
+```
+
+在界面左侧填写需要使用的 SQLite 文件：
+
+```text
+本地 32B：data/db/redbird_sdg13_qwen3_32b_v2.sqlite
+API 中美：data/db/redbird_sdg13_v2.sqlite
+API 多国家：data/db/redbird_sdg13_all_countries_v2.sqlite
+```
+
+Interface 可以浏览、筛选和导出数据库。Chatbot 会先检索数据库，再结合检索结果回答；普通知识问题可以直接使用模型回答。
+
+### 查看 target 分布
+
+每次抽取结束后都会生成 `quality_report.json`。例如：
+
+```bash
+cat data/work/sdg13_china_us/local_100_strict_qwen3_32b_v2/quality_report.json
+```
+
+重点检查：
+
+```text
+target_counts：各 target 的记录数量
+target_shares：各 target 的占比
+dominant_target：占比最高的 target
+warnings：是否出现 target 过度集中的提醒
+```
+
+集中度警告只表示需要人工抽查，不会为了让数量均衡而修改模型结果。
+
+### 运行测试
+
+```bash
+conda run -n redbird env PYTHONPATH=src \
+python -m unittest discover -s tests
+```
+
+## 抽取逻辑
+
+1. 解析器按页读取文件并记录文本质量；低文本量、乱码或解析异常进入 `parse_warnings.jsonl`。
+2. 文档按约 3200 字符切块，相邻块重叠约 400 字符，避免政策动作与依据落在不同块。
+3. 候选筛选只检查正文，并覆盖 manifest 中的英语、西班牙语、葡萄牙语、越南语、法语、中文、德语、阿拉伯语、印尼语、尼泊尔语和日语关键词。
+4. 第一次 Luna 调用只提取明确、可逐字追溯的政策措施，不判断 target。
+5. 第二次 Luna 调用分别检查 `13.1 / 13.2 / 13.3 / 13.a / 13.b`，每个目标返回 supported、insufficient 或 contradicted。
+6. 确定性规则检查 evidence 是否确实存在于原 chunk，target 是否有对应信号，confidence 是否达到 0.75。
+7. 第三次 Luna 调用独立审查，可 accept、revise 或 reject。低置信度和无法追溯的记录不进入正式结果。
+
+13.2 已特别收紧：必须出现气候政策、气候战略、气候规划、气候法律、NDC、将气候措施纳入主流等明确整合信号。只有一般排放、能源、绿色发展、科技或经济内容不能判为 13.2。
+
+## 工作目录
+
+每个实验的 workdir 包含：
+
+- `documents.jsonl`：标准化文档及解析元数据。
+- `chunks.jsonl`：带页码、段落 ID 和语言信息的 chunk。
+- `parse_warnings.jsonl`：解析质量警告。
+- `records.jsonl`：通过分类和审查的 chunk-level 记录。
+- `target_classifications.jsonl`：五目标分类缓存。
+- `reviews.jsonl`：accept、revise、reject 审查日志。
+- `translations.jsonl`：政策级翻译缓存。
 - `checkpoint.json`：抽取进度。
-- `errors.jsonl`：抽取或审查错误日志。
+- `errors.jsonl`：模型或解析错误。
+- `quality_report.json`：target 数量、占比、国家分布和集中度警告。
 
-## 输出字段说明
+修改 prompt、模型或规则时应使用新的 workdir，避免旧 checkpoint 和新逻辑混用。
 
-最终 `records.csv/jsonl` 是 policy-level 结果，即一份政策文件一行。
+## 最终输出
 
-字段包括：
-
-- `country`：国家。
-- `country_iso3`：国家 ISO3 代码。
-- `policy_title`：政策标题原文。
-- `policy_title_en`：政策标题英文。
-- `publication_date`：发布日期。
-- `policy_content`：与 SDG 相关的政策内容原文。
-- `policy_content_en`：政策内容英文。
-- `policy_summary`：政策摘要原文。
-- `policy_summary_en`：政策摘要英文。
-- `sdg_goal`：SDG 目标，例如 `SDG 13`。
-- `sdg_targets`：相关 SDG target，例如 `13.1; 13.2`。
-- `source_filename`：来源文件名。
-- `source_file`：来源文件完整路径。
-- `record_count`：该政策由多少条 chunk-level 记录聚合而来。
-- `review_status`：审查状态。
-- `review_confidence`：审查平均置信度。
-- `translation_model`：翻译模型。
-- `translation_status`：翻译状态。
-- `validation_status`：字段校验状态。
-
-## 抽取逻辑说明
-
-项目不会把整份 PDF 一次性直接交给模型，而是先解析并切分为 chunk。原因是政策 PDF 通常很长，超过模型上下文限制；同时 chunk 能保留更清晰的证据位置，便于审查和追溯。
-
-当前流程是：
+`data/output/.../records.jsonl` 和 `records.csv` 均为 policy-level 结果，一份政策文件一行。主要字段包括：
 
 ```text
-PDF/HTML/TXT/DOCX/CSV
-  -> parse documents
-  -> split chunks
-  -> SDG13 keyword candidate filter
-  -> model extraction
-  -> strict SDG13 filter
-  -> independent review
-  -> chunk-level records
-  -> policy-level aggregation
-  -> English translation
-  -> records.csv/jsonl
+country, country_iso3, policy_title, policy_title_en, publication_date,
+policy_content, policy_content_en, policy_summary, policy_summary_en,
+sdg_goal, sdg_targets, source_filename, source_file, record_count,
+review_status, review_confidence, translation_model,
+translation_status, validation_status
 ```
 
-最终表不是“每个 chunk 一行”，而是“一份政策文件一行”。chunk 只作为内部抽取和证据定位单位。
+原文字段保留政策原语言，`*_en` 字段统一为英文。逐 chunk 的证据、页码和审查记录保留在 workdir 与数据库 `passages` 表，不塞入最终主表。
 
-## 审查机制说明
+## 数据库结构
 
-审查阶段使用独立 prompt：
+- `policies`：一份政策一行。
+- `passages`：已抽取的相关段落、原文语言、页码和审查状态。
+- `policy_targets`：政策与 SDG target 的多对多关系及证据数量。
+- `policies_fts`：索引政策标题、摘要、原文和英文翻译。
+- `passages_fts`：索引实际命中的政策段落。
+- `db_meta`：源文件哈希、构建时间、schema 版本和检索后端。
 
-```text
-prompts/review/sdg13_strict.md
-```
+数据库先构建临时文件，全部成功后原子替换正式 SQLite。界面会检查输出哈希，数据库落后时显示警告。
 
-审查输入包括：
+## 无向量模型的多语言检索
 
-- 原始 chunk 文本。
-- 候选抽取记录。
-- 允许的 SDG13 target 定义。
+本项目不使用 BGE-M3，也不依赖任何本地 embedding 模型。检索按以下顺序完成：
 
-审查输出包括：
+1. 确定性规划器识别国家别名、年份、SDG goal/target、总结、数量和比较意图。
+2. Luna 查询规划器将问题改写为原语言查询和英文查询。
+3. 国家、年份和 target 使用 SQL 精确过滤，不混入全文关键词。
+4. FTS5 同时检索政策原文、英文翻译和 passage。
+5. 如果英文翻译命中 policy 主表，系统通过 policy ID 找回对应的原文 passage，这就是跨语言“翻译桥接”。
+6. 常见气候术语在 12 种语言间扩展；FTS 先尝试 AND，再降级为 OR。
+7. 最多取 20 个候选 passage，由 Luna 依据用户问题重排，最终送入回答模型的默认数量为 8。
+8. “全部、总结、数量、比较”类问题直接走 SQL 聚合，不受 top-k 限制。
 
-- `accept`：记录完全由原文支持。
-- `revise`：记录相关，但需要修正 target、证据 quote 或政策内容。
-- `reject`：记录证据不足、弱相关或 target 不成立。
+这种方案不需要下载额外模型，也不会改动现有本地模型目录。
 
-被拒绝的记录不会进入最终数据库主表，但会保存在：
-
-```text
-data/work/.../reviews.jsonl
-```
-
-## 翻译机制说明
-
-翻译 prompt 位于：
-
-```text
-prompts/translation/en_policy.md
-```
-
-翻译字段：
-
-- `policy_title -> policy_title_en`
-- `policy_content -> policy_content_en`
-- `policy_summary -> policy_summary_en`
-
-翻译要求：
-
-- 忠实翻译，不扩写。
-- 保留数字、年份、百分比、机构名、NDC、UNFCCC、Paris Agreement 等术语。
-- 已经是英文的内容会返回清洁英文版本。
-- 空字段返回空。
-
-翻译缓存保存在：
-
-```text
-data/work/.../translations.jsonl
-```
-
-重复导出时会优先读取缓存，避免重复调用模型。
-
-## 构建 SQLite 数据库
-
-从最终导出的 `records.jsonl` 构建数据库：
+## 启动界面
 
 ```bash
 conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-build \
-  --input data/output/sdg13_china_us/local_100_strict_qwen3_32b_translate32b/records.jsonl \
-  --db data/db/redbird_sdg13.sqlite
+  streamlit run app/redbird_interface.py
 ```
 
-如果当前还没有 32B 输出，也可以先用已有 7B 输出测试：
-
-```bash
-conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-build \
-  --input data/output/sdg13_china_us/local_100_strict_qwen25_7b/records.jsonl \
-  --db data/db/redbird_sdg13.sqlite
-```
-
-数据库包含：
-
-- `policies`：政策主表。
-- `policies_fts`：全文检索索引。
-
-数据库默认路径：
+通常访问：
 
 ```text
-data/db/redbird_sdg13.sqlite
+http://localhost:8501
 ```
 
-## 命令行检索数据库
+界面支持国家、target、年份、审查状态和翻译状态筛选，查看中英文详情，导出当前结果，以及多轮 Chatbot。展开“检索详情”可以看到识别意图、结构化条件、查询变体、FTS 命中数、翻译桥接命中数、最终 passage 数和降级阶段。
 
-示例：
+## Chatbot 回答模式
 
-```bash
-conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-query \
-  --db data/db/redbird_sdg13.sqlite \
-  --q "methane emissions" \
-  --limit 5
-```
+- `general`：普通知识问题，不依赖数据库。
+- `database_search`：检索具体政策 passage，并列出政策、国家、target、页码、文件名和审查状态。
+- `database_aggregate`：总结全部政策或统计数量，使用完整 SQL 结果集合。
+- `compare`：按国家、年份或 target 分组比较。
+- `mixed`：区分数据库事实与模型通用解释。
 
-按国家过滤：
+数据库无命中时，系统只会说“本次数据库检索没有找到证据”，不会断言政策不存在；开启通用知识后仍会继续作答。默认允许 `validation_status=valid` 但尚未审查的实验记录参与检索，并明确标记为 `unreviewed`。只有用户主动勾选“仅使用已审查政策”时才严格过滤。
 
-```bash
-conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-query \
-  --db data/db/redbird_sdg13.sqlite \
-  --q "emissions" \
-  --country "United States"
-```
+## 扩展到全量数据
 
-按 SDG target 过滤：
+先用 20 国 100-chunk 配置检查召回、target 分布、审查拒绝率和翻译质量。确认后复制该配置到新文件，删除 `experiment.max_chunks: 100`，并使用新的 workdir、output_dir 和 db_path。不要直接复用小实验目录。
 
-```bash
-conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-query \
-  --db data/db/redbird_sdg13.sqlite \
-  --q "adaptation" \
-  --sdg-target 13.1
-```
-
-## 启动本地界面
-
-启动 Streamlit：
-
-```bash
-cd "/hpc2hdd/home/czhang162/MyProject/Red Bird"
-conda run -n redbird streamlit run app/redbird_interface.py
-```
-
-界面功能：
-
-- 查看数据库总量。
-- 按国家筛选。
-- 按 SDG target 筛选。
-- 按年份筛选。
-- 按 `review_status` 筛选。
-- 按 `translation_status` 筛选。
-- 全文检索政策标题、内容、摘要。
-- 查看单条政策详情。
-- 查看原文和英文内容。
-- 导出当前筛选结果为 CSV。
-- 使用 Chatbot 基于数据库问答。
-
-如果界面提示数据库不存在，请先运行 `db-build`。
-
-## 使用 Chatbot
-
-Chatbot 位于 Streamlit 界面的 `Chatbot` 标签页。
-
-使用前需要设置 API key：
-
-```bash
-export OPENAI_API_KEY="你的 API key"
-```
-
-Chatbot 配置在：
-
-```yaml
-chatbot:
-  enabled: true
-  db_path: data/db/redbird_sdg13.sqlite
-  prompt_path: prompts/chatbot/policy_qa.md
-  top_k: 6
-  model:
-    backend: api
-    name: gpt-4.1-mini
-    api_base: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    temperature: 0
-    max_tokens: 1500
-    json_mode: false
-```
-
-Chatbot 的工作方式：
-
-```text
-用户问题
-  -> SQLite FTS 检索 top-k 政策记录
-  -> 将检索结果作为上下文
-  -> 调用 API 模型回答
-  -> 显示答案和来源政策
-```
-
-Chatbot 不会直接读取 PDF，也不会使用数据库外部信息。若数据库中没有足够证据，它会提示证据不足。
-
-## 常用实验命令
-
-运行 7B strict 100 实验：
-
-```bash
-cd "/hpc2hdd/home/czhang162/MyProject/Red Bird"
-
-conda run --no-capture-output -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli extract \
-  --config configs/sdg13_china_us_local_100_strict_qwen25_7b.yaml
-
-conda run --no-capture-output -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli export \
-  --config configs/sdg13_china_us_local_100_strict_qwen25_7b.yaml \
-  --format jsonl,csv
-
-python3 /hpc2hdd/home/czhang162/MyProject/zhanka/占卡.py
-```
-
-运行 32B strict + review + translation 实验：
-
-```bash
-cd "/hpc2hdd/home/czhang162/MyProject/Red Bird"
-
-conda run --no-capture-output -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli extract \
-  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_translate32b.yaml
-
-conda run --no-capture-output -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli export \
-  --config configs/sdg13_china_us_local_100_strict_qwen3_32b_translate32b.yaml \
-  --format jsonl,csv
-
-python3 /hpc2hdd/home/czhang162/MyProject/zhanka/占卡.py
-```
-
-构建数据库并启动界面：
-
-```bash
-conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-build \
-  --input data/output/sdg13_china_us/local_100_strict_qwen3_32b_translate32b/records.jsonl \
-  --db data/db/redbird_sdg13.sqlite
-
-conda run -n redbird streamlit run app/redbird_interface.py
-```
+全量任务会产生多次 Luna API 调用：每个候选至少经历抽取、target 分类和审查，导出时还会翻译。建议先估算 API 成本和运行时间。
 
 ## 测试
-
-运行全部单元测试：
 
 ```bash
 conda run -n redbird env PYTHONPATH=src \
   python -m unittest discover -s tests
 ```
 
-当前测试覆盖：
-
-- 文档解析。
-- manifest 过滤。
-- chunk 过滤。
-- strict SDG13 过滤。
-- JSON 解析容错。
-- 审查 accept/revise/reject。
-- policy-level 聚合。
-- 翻译缓存和失败处理。
-- SQLite 导入和全文检索。
-- Chatbot 检索上下文和 API 失败处理。
+测试覆盖解析质量、重叠分块、多语言候选过滤、13.2 去偏、证据追溯、审查、翻译、政策级聚合、passage 数据库、跨语言翻译桥接、未审查记录召回、SQL 汇总和 Chatbot 错误处理。
 
 ## 常见问题
 
-### 为什么不用整份 PDF 直接问模型？
+### Chatbot 总说数据库没有证据
 
-本地模型上下文有限，很多政策 PDF 很长，直接输入整份文件容易超上下文、漏内容或产生幻觉。chunk 化可以降低输入长度，并让每条结果能追溯到具体文本片段。
+检查界面的“检索详情”：
 
-### 最终结果是一份政策一行，还是一个 chunk 一行？
+- 数据库路径是否正确，`policies` 和 `passages` 是否大于 0。
+- 是否误开“仅使用已审查政策”。
+- 数据库是否落后于最新 `records.jsonl`。
+- 查询是否识别出正确国家、target 和模式。
+- `lexical_hits`、`policy_bridge_hits` 与最终命中数分别是多少。
 
-最终 `data/output/.../records.csv/jsonl` 是一份政策一行。chunk-level 结果只保存在 `data/work/.../records.jsonl` 中，用于审计。
+重新导出后，应重新运行 pipeline 或 `db-build` 同步数据库。
 
-### evidence_quote 为什么不在最终表里？
+### API 返回空内容
 
-最终表是数据库主表，保留核心字段。逐条证据 quote 会让表过于杂乱。审计证据可以回看 workdir 中的 chunk-level `records.jsonl` 和 `reviews.jsonl`。
+检查 `OPENAI_API_KEY`、OpenLux 余额、`api_base` 和 `gpt-5.6-luna` 是否可用。Responses API 不兼容时会回退 Chat Completions，但认证和限流错误不会被掩盖。
 
-### 32B 很慢怎么办？
+### 重新运行立刻结束
 
-先用 100 chunk 配置测试。如果显存或速度不够，可以使用 7B 配置：
+对应 workdir 的 `checkpoint.json` 已记录处理完成。需要重新实验时请改用新目录，不要删除或覆盖其他实验结果。
 
-```text
-configs/sdg13_china_us_local_100_strict_qwen25_7b.yaml
-```
+### 显卡占用为 0
 
-### Chatbot 查不到结果怎么办？
-
-先确认数据库已构建：
-
-```bash
-ls -lah data/db/redbird_sdg13.sqlite
-```
-
-再用命令行检索测试：
-
-```bash
-conda run -n redbird env PYTHONPATH=src \
-  python -m sdg_extract.cli db-query \
-  --db data/db/redbird_sdg13.sqlite \
-  --q "emissions"
-```
-
-如果命令行能查到，界面和 Chatbot 通常也能查到。
-
-### Chatbot API 报错怎么办？
-
-检查 `OPENAI_API_KEY`：
-
-```bash
-echo $OPENAI_API_KEY
-```
-
-如果使用其他 OpenAI-compatible 服务，需要修改配置中的：
-
-```yaml
-api_base
-api_key_env
-name
-```
+GPT-5.6 Luna 是远程 API 模型，本地 GPU 不参与抽取、审查、翻译或 Chatbot 生成；当前检索只使用 SQLite FTS5 和 API 重排，因此显卡占用为 0 是正常现象。

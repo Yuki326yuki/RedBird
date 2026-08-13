@@ -47,6 +47,8 @@ class Chunk:
     evidence_char_start: int
     evidence_char_end: int
     metadata: Dict[str, Any] = field(default_factory=dict)
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

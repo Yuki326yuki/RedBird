@@ -1,0 +1,108 @@
+paths:
+  input_dir: data/sdg13_policy_collection/original_documents
+  workdir: data/work/sdg13_china_us/gpt56_luna_v2_100
+  output_dir: data/output/sdg13_china_us/gpt56_luna_v2_100
+  prompt_dir: prompts/sdg13_v2
+
+manifest_path: data/sdg13_policy_collection/download_manifest.csv
+countries:
+  - China
+  - United States
+
+experiment:
+  max_chunks: 100
+  sdg13_filter: true
+  strict_sdg13: true
+  balance_by: country_file
+  neighbor_chunks: 1
+
+chunking:
+  max_chars: 3200
+  overlap_chars: 400
+
+model:
+  backend: api
+  name: gpt-5.6-luna
+  api_base: https://api.openlux.ai/v1
+  api_key_env: OPENAI_API_KEY
+  api_protocol: auto
+  temperature: 0
+  reasoning_effort: medium
+  max_tokens: 2200
+  json_mode: true
+
+target_classification:
+  enabled: true
+  prompt_path: prompts/targeting/sdg13_targets.md
+  cache_path: target_classifications.jsonl
+  min_confidence: 0.75
+  model:
+    backend: api
+    name: gpt-5.6-luna
+    api_base: https://api.openlux.ai/v1
+    api_key_env: OPENAI_API_KEY
+    api_protocol: auto
+    temperature: 0
+    reasoning_effort: medium
+    max_tokens: 1800
+    json_mode: true
+
+review:
+  enabled: true
+  prompt_path: prompts/review/sdg13_v2.md
+  cache_path: reviews.jsonl
+  keep_rejected: false
+  min_confidence: 0.75
+  enforce_traceable_evidence: true
+  model:
+    backend: api
+    name: gpt-5.6-luna
+    api_base: https://api.openlux.ai/v1
+    api_key_env: OPENAI_API_KEY
+    api_protocol: auto
+    temperature: 0
+    reasoning_effort: medium
+    max_tokens: 1800
+    json_mode: true
+
+translation:
+  enabled: true
+  output_language: English
+  prompt_path: prompts/translation/en_policy.md
+  cache_path: translations.jsonl
+  model:
+    backend: api
+    name: gpt-5.6-luna
+    api_base: https://api.openlux.ai/v1
+    api_key_env: OPENAI_API_KEY
+    api_protocol: auto
+    temperature: 0
+    reasoning_effort: low
+    max_tokens: 4000
+    json_mode: true
+
+database:
+  db_path: data/db/redbird_sdg13_v2.sqlite
+
+chatbot:
+  enabled: true
+  db_path: data/db/redbird_sdg13_v2.sqlite
+  prompt_path: prompts/chatbot/policy_qa.md
+  top_k: 8
+  aggregate_limit: 200
+  require_reviewed: false
+  allow_general_knowledge: true
+  conversation_turn_limit: 8
+  llm_query_planning: true
+  llm_reranking: true
+  rerank_candidates: 20
+  model:
+    backend: api
+    name: gpt-5.6-luna
+    api_base: https://api.openlux.ai/v1
+    api_key_env: OPENAI_API_KEY
+    api_protocol: auto
+    temperature: 0
+    reasoning_effort: medium
+    max_tokens: 1800
+    json_mode: false

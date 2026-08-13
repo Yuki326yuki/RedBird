@@ -82,6 +82,7 @@ def parse_file(path: Path, metadata: Optional[Dict[str, Any]] = None) -> Documen
         source_type=source_type,
     )
     metadata = dict(metadata or {})
+    metadata.update(parse_quality_metadata(pages, source_type))
     title = metadata.get("policy_title") or path.stem
     language = metadata.get("language")
     return Document(
@@ -195,6 +196,32 @@ def parse_pdf(path: Path) -> List[PageText]:
     except Exception:
         return [PageText(1, recover_text_from_pdf_bytes(path.read_bytes()))]
 
+
+
+def parse_quality_metadata(pages: List[PageText], source_type: str) -> Dict[str, Any]:
+    if source_type != "pdf":
+        return {"parse_status": "ok", "low_text_pages": []}
+    low_text_pages: List[int] = []
+    replacement_chars = 0
+    total_chars = 0
+    for page in pages:
+        text = page.text or ""
+        total_chars += len(text)
+        replacement_chars += text.count("\ufffd")
+        visible = sum(1 for char in text if char.isprintable() and not char.isspace())
+        if visible < 40 and page.page_number is not None:
+            low_text_pages.append(page.page_number)
+    replacement_ratio = replacement_chars / max(total_chars, 1)
+    status = "warning:low_text_pages" if low_text_pages else "ok"
+    if replacement_ratio > 0.02:
+        status = "warning:garbled_text"
+    return {
+        "parse_status": status,
+        "low_text_pages": low_text_pages,
+        "parsed_page_count": len(pages),
+        "parsed_character_count": total_chars,
+        "replacement_character_ratio": round(replacement_ratio, 5),
+    }
 
 def read_text_file(path: Path) -> str:
     for encoding in ("utf-8", "utf-8-sig", "latin-1"):

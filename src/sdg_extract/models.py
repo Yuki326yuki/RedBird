@@ -30,36 +30,70 @@ class OpenAICompatibleBackend(ModelBackend):
         self.temperature = float(config.get("temperature", 0))
         self.max_tokens = int(config.get("max_tokens", 4000))
         self.json_mode = bool(config.get("json_mode", True))
+        self.api_protocol = str(config.get("api_protocol") or "auto").lower()
+        self.reasoning_effort = config.get("reasoning_effort")
+        self.timeout = int(config.get("timeout", 180))
 
     def complete_json(self, messages: List[Dict[str, str]], schema_hint: str) -> Dict[str, Any]:
         api_key = os.environ.get(self.api_key_env)
         if not api_key:
             raise RuntimeError(f"Missing API key environment variable: {self.api_key_env}")
-        payload = {
+        if self.api_protocol in {"auto", "responses"}:
+            try:
+                data = self.request_responses(messages, api_key)
+                return parse_json_object(extract_api_response_text(data))
+            except ApiCapabilityError:
+                if self.api_protocol == "responses":
+                    raise
+        data = self.request_chat_completions(messages, api_key)
+        return parse_json_object(extract_api_response_text(data))
+
+    def request_responses(self, messages: List[Dict[str, str]], api_key: str) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.name,
+            "input": messages,
+            "max_output_tokens": self.max_tokens,
+        }
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": str(self.reasoning_effort)}
+        if self.json_mode:
+            payload["text"] = {"format": {"type": "json_object"}}
+        return self.request("/responses", payload, api_key, capability_fallback=True)
+
+    def request_chat_completions(self, messages: List[Dict[str, str]], api_key: str) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
             "model": self.name,
             "messages": messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = str(self.reasoning_effort)
         if self.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        return self.request("/chat/completions", payload, api_key, capability_fallback=False)
+
+    def request(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        api_key: str,
+        capability_fallback: bool,
+    ) -> Dict[str, Any]:
         request = urllib.request.Request(
-            f"{self.api_base}/chat/completions",
+            f"{self.api_base}{endpoint}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
+            if capability_fallback and exc.code in {400, 404, 405, 422}:
+                raise ApiCapabilityError(f"Responses API unavailable: HTTP {exc.code}: {detail}") from exc
             raise RuntimeError(f"API request failed: HTTP {exc.code}: {detail}") from exc
-        content = data["choices"][0]["message"]["content"]
-        return parse_json_object(content)
 
     def model_name(self) -> str:
         return self.name
@@ -196,6 +230,29 @@ def build_backend(config: Dict[str, Any]) -> ModelBackend:
         return HeuristicBackend(config)
     raise ValueError(f"Unsupported model backend: {backend}")
 
+
+
+def extract_api_response_text(data: Dict[str, Any]) -> str:
+    if data.get("output_text"):
+        return str(data["output_text"]).strip()
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        content = (choices[0].get("message") or {}).get("content")
+        if isinstance(content, list):
+            return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict)).strip()
+        return str(content or "").strip()
+    texts: List[str] = []
+    for output in data.get("output", []) if isinstance(data.get("output"), list) else []:
+        if not isinstance(output, dict):
+            continue
+        for part in output.get("content", []):
+            if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                texts.append(str(part.get("text") or ""))
+    return "".join(texts).strip()
+
+
+class ApiCapabilityError(RuntimeError):
+    pass
 
 def parse_json_object(text: str) -> Dict[str, Any]:
     candidates = [text.strip(), *extract_fenced_json(text)]

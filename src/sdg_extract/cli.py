@@ -8,15 +8,17 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .chunking import chunk_documents
 from .config import load_config, resolve_path
-from .database import build_database, query_policies
+from .database import build_database, database_summary, query_policies
 from .exporters import export_records
 from .extraction import extract_records, load_documents, load_extracted_records, save_extracted_records
-from .io_utils import ensure_dir, write_jsonl
+from .io_utils import ensure_dir, write_json, write_jsonl
 from .manifest import load_manifest_selection
 from .models import ModelBackend
 from .models import build_backend
 from .parsers import parse_directory
+from .quality import target_distribution_report
 from .review import RecordReviewer
+from .targeting import SDG13TargetClassifier
 from .translation import PolicyTranslator
 
 
@@ -28,6 +30,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ingest_parser.add_argument("--input", required=True, type=Path)
     ingest_parser.add_argument("--workdir", required=True, type=Path)
     ingest_parser.add_argument("--max-chars", type=int, default=6000)
+    ingest_parser.add_argument("--overlap-chars", type=int, default=0)
 
     extract_parser = subparsers.add_parser("extract", help="Run SDG extraction with configured model.")
     extract_parser.add_argument("--config", required=True, type=Path)
@@ -41,6 +44,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     db_build_parser = subparsers.add_parser("db-build", help="Build a SQLite database from exported records.")
     db_build_parser.add_argument("--input", required=True, type=Path)
     db_build_parser.add_argument("--db", required=True, type=Path)
+    db_build_parser.add_argument("--passages", type=Path)
+    db_build_parser.add_argument("--config", type=Path)
 
     db_query_parser = subparsers.add_parser("db-query", help="Search the SQLite policy database.")
     db_query_parser.add_argument("--db", required=True, type=Path)
@@ -49,17 +54,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     db_query_parser.add_argument("--sdg-target", action="append", default=[])
     db_query_parser.add_argument("--limit", type=int, default=10)
 
+    pipeline_parser = subparsers.add_parser("pipeline", help="Run extract, export and synchronized database build.")
+    pipeline_parser.add_argument("--config", required=True, type=Path)
+    pipeline_parser.add_argument("--format", default="jsonl,csv")
+
     args = parser.parse_args(argv)
     if args.command == "ingest":
-        return run_ingest(args.input, args.workdir, args.max_chars)
+        return run_ingest(args.input, args.workdir, args.max_chars, args.overlap_chars)
     if args.command == "extract":
         return run_extract(args.config)
     if args.command == "export":
         return run_export_command(args.config, args.workdir, args.output, args.format)
     if args.command == "db-build":
-        return run_db_build(args.input, args.db)
+        return run_db_build(args.input, args.db, passages_path=args.passages, config_path=args.config)
     if args.command == "db-query":
         return run_db_query(args.db, args.q, args.country, args.sdg_target, args.limit)
+    if args.command == "pipeline":
+        return run_pipeline(args.config, args.format)
     parser.error(f"Unknown command: {args.command}")
     return 2
 
@@ -68,14 +79,26 @@ def run_ingest(
     input_dir: Path,
     workdir: Path,
     max_chars: int,
+    overlap_chars: int = 0,
     allowed_paths: Optional[Set[Path]] = None,
     metadata_by_path: Optional[Dict[Path, Dict[str, object]]] = None,
 ) -> int:
     ensure_dir(workdir)
     documents = parse_directory(input_dir, allowed_paths=allowed_paths, metadata_by_path=metadata_by_path, show_progress=True)
-    chunks = chunk_documents(documents, max_chars=max_chars)
+    chunks = chunk_documents(documents, max_chars=max_chars, overlap_chars=overlap_chars)
     write_jsonl(workdir / "documents.jsonl", [document.to_dict() for document in documents])
     write_jsonl(workdir / "chunks.jsonl", [chunk.to_dict() for chunk in chunks])
+    warnings = [
+        {
+            "document_id": document.document_id,
+            "source_file": document.source_file,
+            "parse_status": document.metadata.get("parse_status"),
+            "low_text_pages": document.metadata.get("low_text_pages", []),
+        }
+        for document in documents
+        if str(document.metadata.get("parse_status") or "ok") != "ok"
+    ]
+    write_jsonl(workdir / "parse_warnings.jsonl", warnings)
     print(f"Parsed {len(documents)} documents and {len(chunks)} chunks.")
     print(f"Wrote {workdir / 'documents.jsonl'}")
     print(f"Wrote {workdir / 'chunks.jsonl'}")
@@ -95,6 +118,7 @@ def run_extract(config_path: Path) -> int:
             input_dir,
             workdir,
             int(config["chunking"]["max_chars"]),
+            int(config["chunking"].get("overlap_chars", 0)),
             allowed_paths=allowed_paths,
             metadata_by_path=metadata_by_path,
         )
@@ -107,6 +131,7 @@ def run_extract(config_path: Path) -> int:
     )
     backend = build_backend(config["model"])
     print(f"[INFO] Model backend ready: {backend.model_name()}", flush=True)
+    target_classifier = build_target_classifier_for_config(config, project_root, workdir, backend)
     reviewer = build_reviewer_for_config(config, project_root, workdir, backend)
     prompt_dir = resolve_path(paths.get("prompt_dir", "prompts"), project_root)
     records_path = workdir / "records.jsonl"
@@ -116,6 +141,7 @@ def run_extract(config_path: Path) -> int:
         backend=backend,
         prompt_dir=prompt_dir,
         max_chars=int(config["chunking"]["max_chars"]),
+        overlap_chars=int(config["chunking"].get("overlap_chars", 0)),
         records_path=records_path,
         checkpoint_path=workdir / "checkpoint.json",
         errors_path=workdir / "errors.jsonl",
@@ -123,11 +149,23 @@ def run_extract(config_path: Path) -> int:
         sdg13_filter=bool(experiment.get("sdg13_filter", False)),
         strict_sdg13=bool(experiment.get("strict_sdg13", False)),
         balance_by=experiment.get("balance_by"),
+        neighbor_chunks=int(experiment.get("neighbor_chunks", 0)),
         reviewer=reviewer,
+        target_classifier=target_classifier,
     )
     save_extracted_records(records_path, records)
+    quality_report = target_distribution_report(records)
+    quality_path = workdir / "quality_report.json"
+    write_json(quality_path, quality_report)
     print(f"Extracted {len(records)} records.")
     print(f"Wrote {workdir / 'records.jsonl'}")
+    print(
+        f"[QUALITY] targets={quality_report['target_counts']} "
+        f"dominant={quality_report['dominant_target']}:{quality_report['dominant_share']:.1%} "
+        f"warnings={quality_report['warnings']}",
+        flush=True,
+    )
+    print(f"Wrote {quality_path}")
     return 0
 
 
@@ -169,6 +207,38 @@ def run_export_command(
     return run_export(workdir, output_dir, formats, translator=translator)
 
 
+
+def build_target_classifier_for_config(
+    config: dict,
+    project_root: Path,
+    workdir: Path,
+    extraction_backend: ModelBackend,
+) -> Optional[SDG13TargetClassifier]:
+    classifier_config = config.get("target_classification") or {}
+    if not classifier_config.get("enabled"):
+        return None
+    model_config = classifier_config.get("model") or config.get("model")
+    if not model_config:
+        raise ValueError("target_classification.model is required when enabled.")
+    prompt_path = resolve_path(
+        classifier_config.get("prompt_path", "prompts/targeting/sdg13_targets.md"),
+        project_root,
+    )
+    cache_path = Path(str(classifier_config.get("cache_path") or "target_classifications.jsonl"))
+    if not cache_path.is_absolute():
+        cache_path = workdir / cache_path
+    if same_model_config(model_config, config.get("model") or {}):
+        backend = extraction_backend
+        print(f"[INFO] Reusing extraction backend for target classification: {backend.model_name()}", flush=True)
+    else:
+        backend = build_backend(model_config)
+    return SDG13TargetClassifier(
+        backend=backend,
+        prompt_path=prompt_path,
+        cache_path=cache_path,
+        min_confidence=float(classifier_config.get("min_confidence", 0.75)),
+    )
+
 def build_reviewer_for_config(
     config: dict,
     project_root: Path,
@@ -205,6 +275,8 @@ def build_reviewer_for_config(
         prompt_path=prompt_path,
         cache_path=cache_path,
         keep_rejected=bool(review_config.get("keep_rejected", False)),
+        min_confidence=float(review_config.get("min_confidence", 0.75)),
+        enforce_traceable_evidence=bool(review_config.get("enforce_traceable_evidence", False)),
     )
 
 
@@ -259,10 +331,45 @@ def run_export(
     return 0
 
 
-def run_db_build(input_path: Path, db_path: Path) -> int:
-    count = build_database(input_path, db_path)
-    print(f"Imported {count} policy records.")
+def run_db_build(
+    input_path: Path,
+    db_path: Path,
+    passages_path: Optional[Path] = None,
+    config_path: Optional[Path] = None,
+) -> int:
+    if config_path:
+        load_config(config_path)
+    count = build_database(input_path, db_path, passages_path=passages_path)
+    summary = database_summary(db_path)
+    print(f"Imported {count} policy records and {summary.get('passages', 0)} passages.")
     print(f"Wrote {db_path}")
+    return 0
+
+
+def run_pipeline(config_path: Path, formats: str) -> int:
+    config = load_config(config_path)
+    project_root = infer_project_root(config_path)
+    paths = config["paths"]
+    workdir = resolve_path(paths["workdir"], project_root)
+    output_dir = resolve_path(paths.get("output_dir", "data/output"), project_root)
+    run_extract(config_path)
+    run_export_command(config_path, workdir, output_dir, formats)
+    database_config = config.get("database") or {}
+    chatbot_config = config.get("chatbot") or {}
+    db_value = database_config.get("db_path") or chatbot_config.get("db_path") or "data/db/redbird_sdg13.sqlite"
+    db_path = resolve_path(str(db_value), project_root)
+    input_path = output_dir / "records.jsonl"
+    passages_path = workdir / "records.jsonl"
+    count = build_database(
+        input_path,
+        db_path,
+        passages_path=passages_path,
+    )
+    summary = database_summary(db_path)
+    print(
+        f"[PIPELINE] Database synchronized: policies={count} passages={summary.get('passages', 0)} db={db_path}",
+        flush=True,
+    )
     return 0
 
 

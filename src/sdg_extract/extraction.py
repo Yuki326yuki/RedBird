@@ -10,57 +10,16 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 from .chunking import chunk_documents
 from .io_utils import read_jsonl, write_jsonl
 from .models import ModelBackend
+from .multilingual import CLIMATE_TERMS, TARGET_TERMS
 from .review import RecordReviewer
-from .schema import OUTPUT_FIELDS, normalize_records, output_schema_prompt
+from .schema import OUTPUT_FIELDS, evidence_candidate_schema_prompt, normalize_records, output_schema_prompt
+from .targeting import SDG13TargetClassifier, target_has_required_signal
 from .types import Chunk, Document, Paragraph
 
 
 SDG13_TARGETS = {"13.1", "13.2", "13.3", "13.a", "13.b"}
-SDG13_KEYWORDS = [
-    "climate",
-    "greenhouse gas",
-    "greenhouse gases",
-    "ghg",
-    "emissions",
-    "emission reduction",
-    "mitigation",
-    "adaptation",
-    "climate adaptation",
-    "resilience",
-    "resilient",
-    "carbon",
-    "net zero",
-    "ndc",
-    "nationally determined contribution",
-    "unfccc",
-    "paris agreement",
-    "disaster risk",
-    "extreme weather",
-    "early warning",
-    "climate finance",
-    "气候",
-    "温室气体",
-    "排放",
-    "减排",
-    "碳",
-    "低碳",
-    "零碳",
-    "净零",
-    "碳中和",
-    "碳达峰",
-    "碳市场",
-    "碳交易",
-    "气候适应",
-    "适应气候",
-    "气候韧性",
-    "韧性",
-    "灾害风险",
-    "极端天气",
-    "预警",
-    "国家自主贡献",
-    "巴黎协定",
-    "气候融资",
-]
+SDG13_TARGET_KEYWORDS = TARGET_TERMS
+SDG13_KEYWORDS = CLIMATE_TERMS
 
 
 def load_documents(path: Path) -> List[Document]:
@@ -86,6 +45,7 @@ def extract_records(
     backend: ModelBackend,
     prompt_dir: Path,
     max_chars: int,
+    overlap_chars: int = 0,
     records_path: Optional[Path] = None,
     checkpoint_path: Optional[Path] = None,
     errors_path: Optional[Path] = None,
@@ -93,17 +53,20 @@ def extract_records(
     sdg13_filter: bool = False,
     strict_sdg13: bool = False,
     balance_by: Optional[str] = None,
+    neighbor_chunks: int = 0,
     reviewer: Optional[RecordReviewer] = None,
+    target_classifier: Optional[SDG13TargetClassifier] = None,
 ) -> List[Dict[str, Any]]:
     system_prompt = read_prompt(prompt_dir / "system.md")
     extraction_prompt = read_prompt(prompt_dir / "extraction.md")
-    schema_hint = output_schema_prompt()
-    all_chunks = chunk_documents(documents, max_chars=max_chars)
+    schema_hint = evidence_candidate_schema_prompt() if target_classifier else output_schema_prompt()
+    all_chunks = chunk_documents(documents, max_chars=max_chars, overlap_chars=overlap_chars)
     chunks = select_extraction_chunks(
         all_chunks,
         max_chunks=max_chunks,
         sdg13_filter=sdg13_filter,
         balance_by=balance_by,
+        neighbor_chunks=neighbor_chunks,
     )
     total_chunks = len(chunks)
     completed_chunks = load_completed_chunks(checkpoint_path)
@@ -130,6 +93,7 @@ def extract_records(
                 extraction_prompt=extraction_prompt,
                 schema_hint=schema_hint,
                 strict_sdg13=strict_sdg13,
+                target_classifier=target_classifier,
             )
             if reviewer:
                 before_review = len(normalized)
@@ -147,6 +111,7 @@ def extract_records(
                 {
                     "chunk_index": index,
                     "chunk_id": chunk.chunk_id,
+        "language": chunk.metadata.get("language"),
                     "source_file": chunk.source_file,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
@@ -183,29 +148,89 @@ def select_extraction_chunks(
     max_chunks: Optional[int],
     sdg13_filter: bool,
     balance_by: Optional[str],
+    neighbor_chunks: int = 0,
 ) -> List[Chunk]:
-    selected = [chunk for chunk in chunks if not sdg13_filter or is_sdg13_relevant_chunk(chunk)]
-    if sdg13_filter:
-        print(f"[FILTER] SDG13 candidate chunks: {len(selected)}/{len(chunks)}", flush=True)
+    if not sdg13_filter:
+        return chunks[: int(max_chunks)] if max_chunks is not None else list(chunks)
+
+    scored = []
+    for chunk in chunks:
+        scores = score_sdg13_chunk(chunk)
+        if scores:
+            best_target = max(scores, key=scores.get)
+            scored.append((chunk, best_target, scores[best_target]))
+    print(f"[FILTER] SDG13 candidate chunks: {len(scored)}/{len(chunks)}", flush=True)
     if balance_by == "country_file":
-        selected = round_robin_by_country_file(selected)
-    if max_chunks is not None:
-        selected = selected[: int(max_chunks)]
-    return selected
+        ranked = round_robin_scored_chunks(scored)
+    else:
+        ranked = [item[0] for item in sorted(scored, key=lambda item: item[2], reverse=True)]
+    return include_neighbor_chunks(chunks, ranked, max(0, int(neighbor_chunks)), max_chunks)
+
+
+def score_sdg13_chunk(chunk: Chunk) -> Dict[str, float]:
+    text = chunk.text.lower()
+    generic_hits = sum(1 for keyword in SDG13_KEYWORDS if keyword.lower() in text)
+    scores: Dict[str, float] = {}
+    for target, keywords in SDG13_TARGET_KEYWORDS.items():
+        specific_hits = sum(1 for keyword in keywords if keyword.lower() in text)
+        if specific_hits:
+            scores[target] = specific_hits * 3.0 + min(generic_hits, 5) * 0.25
+    if not scores and generic_hits:
+        scores["general"] = float(generic_hits)
+    return scores
 
 
 def is_sdg13_relevant_chunk(chunk: Chunk) -> bool:
-    metadata = chunk.metadata or {}
-    haystack = " ".join(
-        str(value or "")
-        for value in [
-            metadata.get("policy_title"),
-            metadata.get("source_filename"),
-            chunk.source_file,
-            chunk.text,
-        ]
-    ).lower()
-    return any(keyword.lower() in haystack for keyword in SDG13_KEYWORDS)
+    return bool(score_sdg13_chunk(chunk))
+
+
+def round_robin_scored_chunks(scored: List[Tuple[Chunk, str, float]]) -> List[Chunk]:
+    groups: Dict[Tuple[str, str, str], Deque[Tuple[Chunk, float]]] = defaultdict(deque)
+    for chunk, target, score in sorted(scored, key=lambda item: item[2], reverse=True):
+        metadata = chunk.metadata or {}
+        key = (
+            str(metadata.get("country") or ""),
+            str(metadata.get("source_filename") or chunk.source_file),
+            target,
+        )
+        groups[key].append((chunk, score))
+    queues: Deque[Tuple[str, str, str]] = deque(sorted(groups))
+    ordered: List[Chunk] = []
+    while queues:
+        key = queues.popleft()
+        chunk, _ = groups[key].popleft()
+        ordered.append(chunk)
+        if groups[key]:
+            queues.append(key)
+    return ordered
+
+
+def include_neighbor_chunks(
+    all_chunks: List[Chunk],
+    ranked: List[Chunk],
+    neighbor_count: int,
+    max_chunks: Optional[int],
+) -> List[Chunk]:
+    positions = {chunk.chunk_id: index for index, chunk in enumerate(all_chunks)}
+    selected: List[Chunk] = []
+    seen = set()
+    limit = int(max_chunks) if max_chunks is not None else None
+    for chunk in ranked:
+        index = positions[chunk.chunk_id]
+        candidate_indexes = [index]
+        for offset in range(1, neighbor_count + 1):
+            candidate_indexes.extend([index - offset, index + offset])
+        for candidate_index in candidate_indexes:
+            if not 0 <= candidate_index < len(all_chunks):
+                continue
+            candidate = all_chunks[candidate_index]
+            if candidate.document_id != chunk.document_id or candidate.chunk_id in seen:
+                continue
+            seen.add(candidate.chunk_id)
+            selected.append(candidate)
+            if limit is not None and len(selected) >= limit:
+                return selected
+    return selected
 
 
 def round_robin_by_country_file(chunks: List[Chunk]) -> List[Chunk]:
@@ -235,6 +260,7 @@ def extract_chunk_records(
     extraction_prompt: str,
     schema_hint: str,
     strict_sdg13: bool = False,
+    target_classifier: Optional[SDG13TargetClassifier] = None,
 ) -> List[Dict[str, Any]]:
     messages = [
         {"role": "system", "content": system_prompt},
@@ -248,15 +274,19 @@ def extract_chunk_records(
     if not isinstance(raw_records, list):
         raise ValueError("Model JSON must contain a list field named 'records'.")
     raw_records = [sanitize_raw_record(record) for record in raw_records if isinstance(record, dict)]
+    if target_classifier:
+        raw_records = target_classifier.classify(chunk, raw_records)
     defaults = {
         "document_id": chunk.document_id,
         "source_file": chunk.source_file,
         "source_filename": Path(chunk.source_file).name,
         "source_type": chunk.source_type,
-        "evidence_page": chunk.evidence_page,
+        "chunk_id": chunk.chunk_id,
+        "evidence_page": chunk.page_start or chunk.evidence_page,
+        "evidence_page_end": chunk.page_end,
+        "evidence_paragraph_ids": chunk.paragraph_ids,
         "evidence_char_start": chunk.evidence_char_start,
         "evidence_char_end": chunk.evidence_char_end,
-        "extraction_model": backend.model_name(),
     }
     authoritative_metadata = {
         key: value
@@ -325,9 +355,10 @@ def filter_strict_sdg13_records(records: List[Dict[str, Any]]) -> List[Dict[str,
 def is_record_text_sdg13_relevant(record: Dict[str, Any]) -> bool:
     text = " ".join(
         str(record.get(field) or "")
-        for field in ["policy_content_original", "policy_content_summary", "evidence_quote", "policy_title"]
-    ).lower()
-    return any(keyword.lower() in text for keyword in SDG13_KEYWORDS)
+        for field in ["policy_content_original", "policy_content_summary", "evidence_quote"]
+    )
+    target = str(record.get("sdg_target") or "")
+    return target in SDG13_TARGETS and target_has_required_signal(target, text)
 
 
 def dedupe_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -336,6 +367,7 @@ def dedupe_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for record in records:
         key = (
             record.get("source_filename"),
+            record.get("sdg_target"),
             normalize_space(record.get("policy_content_original")),
             normalize_space(record.get("evidence_quote")),
         )
