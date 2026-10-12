@@ -18,8 +18,8 @@ from sdg_extract.config import load_config, resolve_path  # noqa: E402
 from sdg_extract.database import database_is_stale, database_summary, distinct_values, query_policies  # noqa: E402
 
 
-DEFAULT_DB = PROJECT_ROOT / "data/db/redbird_sdg13_v2.sqlite"
-DEFAULT_CONFIG = PROJECT_ROOT / "configs/sdg13_china_us_gpt56_luna_v2.yaml"
+DEFAULT_DB = PROJECT_ROOT / "data/db/redbird_sdg13_china_us_mexico_2_each_qwen25_7b_bf16.sqlite"
+DEFAULT_CONFIG = PROJECT_ROOT / "configs/sdg13_china_us_mexico_local_2_each_qwen25_7b_bf16.yaml"
 DEFAULT_PROMPT = PROJECT_ROOT / "prompts/chatbot/policy_qa.md"
 
 
@@ -61,7 +61,7 @@ if not db_path.exists():
     st.warning(f"Database not found: {db_path}")
     st.code(
         "PYTHONPATH=src python -m sdg_extract.cli pipeline "
-        "--config configs/sdg13_china_us_gpt56_luna_v2.yaml"
+        "--config configs/sdg13_china_us_mexico_local_2_each_qwen25_7b_bf16.yaml"
     )
     st.stop()
 
