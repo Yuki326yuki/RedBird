@@ -21,6 +21,20 @@ OUTPUT_FIELDS = [
 ]
 
 
+INTERNAL_FIELDS = [
+    "language",
+    "chunk_id",
+    "evidence_page",
+    "evidence_page_end",
+    "evidence_paragraph_ids",
+    "extraction_model",
+    "target_reason",
+    "review_status",
+    "review_confidence",
+    "review_model",
+]
+
+
 REQUIRED_FIELDS = [
     "country",
     "policy_title",
@@ -38,9 +52,12 @@ def normalize_records(
     normalized: List[Dict[str, Any]] = []
     for raw in raw_records:
         record = {field: normalize_empty(raw.get(field)) for field in OUTPUT_FIELDS}
+        for field in INTERNAL_FIELDS:
+            if field in raw:
+                record[field] = normalize_empty(raw.get(field))
         if defaults:
             for key, value in defaults.items():
-                if key in OUTPUT_FIELDS and record.get(key) in {None, ""}:
+                if key in OUTPUT_FIELDS + INTERNAL_FIELDS and record.get(key) in {None, ""}:
                     record[key] = normalize_empty(value)
         record["validation_status"] = validate_record(record)
         normalized.append(record)
@@ -104,3 +121,14 @@ def valid_sdg_target(value: str) -> bool:
 
 def output_schema_prompt() -> str:
     return "\n".join(f"- {field}" for field in OUTPUT_FIELDS)
+
+
+def evidence_candidate_schema_prompt() -> str:
+    return "\n".join(
+        f"- {field}"
+        for field in [
+            "policy_content_original",
+            "policy_content_summary",
+            "evidence_quote",
+        ]
+    )

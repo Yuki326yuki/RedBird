@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -14,12 +16,26 @@ from typing import Any, Dict, List
 
 class ModelBackend(ABC):
     @abstractmethod
-    def complete_json(self, messages: List[Dict[str, str]], schema_hint: str) -> Dict[str, Any]:
+    def complete_json(
+        self,
+        messages: List[Dict[str, str]],
+        schema_hint: str,
+        *,
+        max_tokens: int | None = None,
+        stage: str | None = None,
+    ) -> Dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
     def model_name(self) -> str:
         raise NotImplementedError
+
+    def close(self) -> None:
+        """Release backend resources when a pipeline stage is complete."""
+
+
+class ModelOutOfMemoryError(RuntimeError):
+    """Raised after a local model exhausts GPU memory and its retry also fails."""
 
 
 class OpenAICompatibleBackend(ModelBackend):
@@ -30,36 +46,87 @@ class OpenAICompatibleBackend(ModelBackend):
         self.temperature = float(config.get("temperature", 0))
         self.max_tokens = int(config.get("max_tokens", 4000))
         self.json_mode = bool(config.get("json_mode", True))
+        self.api_protocol = str(config.get("api_protocol") or "auto").lower()
+        self.reasoning_effort = config.get("reasoning_effort")
+        self.timeout = int(config.get("timeout", 180))
 
-    def complete_json(self, messages: List[Dict[str, str]], schema_hint: str) -> Dict[str, Any]:
+    def complete_json(
+        self,
+        messages: List[Dict[str, str]],
+        schema_hint: str,
+        *,
+        max_tokens: int | None = None,
+        stage: str | None = None,
+    ) -> Dict[str, Any]:
         api_key = os.environ.get(self.api_key_env)
         if not api_key:
             raise RuntimeError(f"Missing API key environment variable: {self.api_key_env}")
-        payload = {
+        if self.api_protocol in {"auto", "responses"}:
+            try:
+                data = self.request_responses(messages, api_key, max_tokens=max_tokens)
+                return parse_json_object(extract_api_response_text(data))
+            except ApiCapabilityError:
+                if self.api_protocol == "responses":
+                    raise
+        data = self.request_chat_completions(messages, api_key, max_tokens=max_tokens)
+        return parse_json_object(extract_api_response_text(data))
+
+    def request_responses(
+        self,
+        messages: List[Dict[str, str]],
+        api_key: str,
+        max_tokens: int | None = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.name,
+            "input": messages,
+            "max_output_tokens": int(max_tokens or self.max_tokens),
+        }
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": str(self.reasoning_effort)}
+        if self.json_mode:
+            payload["text"] = {"format": {"type": "json_object"}}
+        return self.request("/responses", payload, api_key, capability_fallback=True)
+
+    def request_chat_completions(
+        self,
+        messages: List[Dict[str, str]],
+        api_key: str,
+        max_tokens: int | None = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
             "model": self.name,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": int(max_tokens or self.max_tokens),
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = str(self.reasoning_effort)
         if self.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        return self.request("/chat/completions", payload, api_key, capability_fallback=False)
+
+    def request(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        api_key: str,
+        capability_fallback: bool,
+    ) -> Dict[str, Any]:
         request = urllib.request.Request(
-            f"{self.api_base}/chat/completions",
+            f"{self.api_base}{endpoint}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
+            if capability_fallback and exc.code in {400, 404, 405, 422}:
+                raise ApiCapabilityError(f"Responses API unavailable: HTTP {exc.code}: {detail}") from exc
             raise RuntimeError(f"API request failed: HTTP {exc.code}: {detail}") from exc
-        content = data["choices"][0]["message"]["content"]
-        return parse_json_object(content)
 
     def model_name(self) -> str:
         return self.name
@@ -72,7 +139,7 @@ class LocalTransformersBackend(ModelBackend):
             raise RuntimeError("model.local_model_path is required for local_transformers backend.")
         try:
             import torch  # type: ignore
-            from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline  # type: ignore
+            from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
         except ModuleNotFoundError as exc:
             raise RuntimeError(
                 "local_transformers backend requires optional dependencies: transformers and torch."
@@ -80,9 +147,16 @@ class LocalTransformersBackend(ModelBackend):
 
         self.name = str(config.get("name") or model_path)
         self.max_tokens = int(config.get("max_tokens", 4000))
+        self.oom_retry_max_tokens = int(
+            config.get("oom_retry_max_tokens", max(128, self.max_tokens // 2))
+        )
+        self.max_input_tokens = int(config.get("max_input_tokens", 6144))
         self.temperature = float(config.get("temperature", 0))
         self.use_chat_template = bool(config.get("use_chat_template", False))
         self.enable_thinking = bool(config.get("enable_thinking", True))
+        self.raise_on_parse_error = bool(config.get("raise_on_parse_error", False))
+        self.quantization_mode = normalize_quantization_mode(config)
+        self._torch = torch
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         dtype_value = config.get("torch_dtype")
         torch_dtype = (
@@ -92,25 +166,67 @@ class LocalTransformersBackend(ModelBackend):
             if torch.cuda.is_available()
             else None
         )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch_dtype,
-            device_map="auto",
-            trust_remote_code=True,
+        model_kwargs: Dict[str, Any] = {
+            "torch_dtype": torch_dtype,
+            "device_map": "auto",
+            "trust_remote_code": True,
+        }
+        attention = str(config.get("attn_implementation") or "").strip()
+        if attention:
+            model_kwargs["attn_implementation"] = attention
+        if self.quantization_mode == "int8":
+            try:
+                from transformers import BitsAndBytesConfig  # type: ignore
+                import bitsandbytes  # type: ignore  # noqa: F401
+            except (ImportError, ModuleNotFoundError) as exc:
+                raise RuntimeError(
+                    "8-bit local loading requires bitsandbytes. Install the local extra and bitsandbytes."
+                ) from exc
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        print(
+            f"[INFO] Loading local model quantization={self.quantization_mode} "
+            f"dtype={dtype_value or 'float16'} attention={attention or 'default'}",
+            flush=True,
         )
+        model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+        model.eval()
         self.tokenizer = tokenizer
-        self.generator = pipeline("text-generation", model=model, tokenizer=tokenizer)
+        self.model = model
+        self._prepare_generation_config()
+        self._print_cuda_memory("model_ready")
 
-    def complete_json(self, messages: List[Dict[str, str]], schema_hint: str) -> Dict[str, Any]:
+    def complete_json(
+        self,
+        messages: List[Dict[str, str]],
+        schema_hint: str,
+        *,
+        max_tokens: int | None = None,
+        stage: str | None = None,
+    ) -> Dict[str, Any]:
         prompt = self.build_prompt(messages)
-        outputs = self.generator(
-            prompt,
-            max_new_tokens=self.max_tokens,
-            do_sample=self.temperature > 0,
-            temperature=max(self.temperature, 0.01),
-            return_full_text=False,
-        )
-        content = outputs[0]["generated_text"]
+        token_limit = int(max_tokens or self.max_tokens)
+        retry_limit = min(self.oom_retry_max_tokens, max(128, token_limit // 2))
+        retry_after_oom = False
+        try:
+            content = self._generate(prompt, token_limit, stage=stage or "generation")
+        except self._torch.cuda.OutOfMemoryError:
+            retry_after_oom = True
+        if retry_after_oom:
+            self._clear_cuda_cache()
+            print(
+                f"[WARN] CUDA OOM stage={stage or 'generation'} at max_new_tokens={token_limit}; "
+                f"retrying once with max_new_tokens={retry_limit}.",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                content = self._generate(prompt, retry_limit, stage=f"{stage or 'generation'}_oom_retry")
+            except self._torch.cuda.OutOfMemoryError as retry_error:
+                self._clear_cuda_cache()
+                raise ModelOutOfMemoryError(
+                    "CUDA out of memory after retry "
+                    f"(max_new_tokens={token_limit}->{retry_limit})."
+                ) from retry_error
         try:
             return parse_json_object(content)
         except (json.JSONDecodeError, ValueError) as exc:
@@ -121,7 +237,80 @@ class LocalTransformersBackend(ModelBackend):
                 file=sys.stderr,
                 flush=True,
             )
+            if self.raise_on_parse_error:
+                raise ValueError(f"Local model returned invalid JSON; debug output: {path}") from exc
             return {"records": []}
+
+    def _generate(self, prompt: str, max_new_tokens: int, stage: str) -> str:
+        encoded = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
+        input_tokens = int(encoded["input_ids"].shape[-1])
+        if input_tokens > self.max_input_tokens:
+            raise ValueError(
+                f"Input is {input_tokens} tokens, above configured limit {self.max_input_tokens} "
+                f"for stage {stage}."
+            )
+        input_device = self.model.get_input_embeddings().weight.device
+        encoded = {key: value.to(input_device) for key, value in encoded.items()}
+        generation_options: Dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": self.temperature > 0,
+            "use_cache": True,
+            "generation_config": self.generation_config,
+            "pad_token_id": (
+                self.tokenizer.pad_token_id
+                if self.tokenizer.pad_token_id is not None
+                else self.tokenizer.eos_token_id
+            ),
+        }
+        if self.temperature > 0:
+            generation_options["temperature"] = self.temperature
+        started_at = time.time()
+        with self._torch.inference_mode():
+            generated = self.model.generate(**encoded, **generation_options)
+        elapsed = max(time.time() - started_at, 1e-9)
+        generated_ids = generated[0, input_tokens:]
+        output_tokens = int(generated_ids.shape[-1])
+        print(
+            f"[MODEL] stage={stage} input_tokens={input_tokens} output_tokens={output_tokens} "
+            f"elapsed_sec={elapsed:.1f} tokens_per_sec={output_tokens / elapsed:.2f}",
+            flush=True,
+        )
+        self._print_cuda_memory(stage)
+        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+    def _prepare_generation_config(self) -> None:
+        import copy
+
+        self.generation_config = copy.deepcopy(self.model.generation_config)
+        self.generation_config.do_sample = self.temperature > 0
+        if self.temperature <= 0:
+            self.generation_config.temperature = None
+            self.generation_config.top_p = None
+            self.generation_config.top_k = None
+
+    def _clear_cuda_cache(self) -> None:
+        gc.collect()
+        if self._torch.cuda.is_available():
+            self._torch.cuda.empty_cache()
+
+    def _print_cuda_memory(self, stage: str) -> None:
+        if not self._torch.cuda.is_available():
+            return
+        allocated = self._torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = self._torch.cuda.memory_reserved() / (1024 ** 3)
+        print(
+            f"[GPU] stage={stage} allocated_gib={allocated:.2f} reserved_gib={reserved:.2f}",
+            flush=True,
+        )
+
+    def close(self) -> None:
+        model = getattr(self, "model", None)
+        if model is not None:
+            del self.model
+        tokenizer = getattr(self, "tokenizer", None)
+        if tokenizer is not None:
+            del self.tokenizer
+        self._clear_cuda_cache()
 
     def model_name(self) -> str:
         return self.name
@@ -155,7 +344,14 @@ class HeuristicBackend(ModelBackend):
     def __init__(self, config: Dict[str, Any]) -> None:
         self.name = config.get("name") or "heuristic"
 
-    def complete_json(self, messages: List[Dict[str, str]], schema_hint: str) -> Dict[str, Any]:
+    def complete_json(
+        self,
+        messages: List[Dict[str, str]],
+        schema_hint: str,
+        *,
+        max_tokens: int | None = None,
+        stage: str | None = None,
+    ) -> Dict[str, Any]:
         user_text = messages[-1]["content"].rsplit("Source text:\n", 1)[-1]
         records: List[Dict[str, Any]] = []
         for paragraph_id, page, text in re.findall(
@@ -196,6 +392,43 @@ def build_backend(config: Dict[str, Any]) -> ModelBackend:
         return HeuristicBackend(config)
     raise ValueError(f"Unsupported model backend: {backend}")
 
+
+def normalize_quantization_mode(config: Dict[str, Any]) -> str:
+    quantization = config.get("quantization") or {}
+    if isinstance(quantization, str):
+        mode = quantization
+    elif isinstance(quantization, dict):
+        mode = quantization.get("mode", "none")
+    else:
+        raise ValueError("model.quantization must be a mapping or string.")
+    normalized = str(mode or "none").strip().lower()
+    if normalized not in {"none", "int8"}:
+        raise ValueError(f"Unsupported local model quantization mode: {normalized}")
+    return normalized
+
+
+
+def extract_api_response_text(data: Dict[str, Any]) -> str:
+    if data.get("output_text"):
+        return str(data["output_text"]).strip()
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        content = (choices[0].get("message") or {}).get("content")
+        if isinstance(content, list):
+            return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict)).strip()
+        return str(content or "").strip()
+    texts: List[str] = []
+    for output in data.get("output", []) if isinstance(data.get("output"), list) else []:
+        if not isinstance(output, dict):
+            continue
+        for part in output.get("content", []):
+            if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                texts.append(str(part.get("text") or ""))
+    return "".join(texts).strip()
+
+
+class ApiCapabilityError(RuntimeError):
+    pass
 
 def parse_json_object(text: str) -> Dict[str, Any]:
     candidates = [text.strip(), *extract_fenced_json(text)]

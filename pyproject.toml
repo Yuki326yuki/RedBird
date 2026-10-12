@@ -13,7 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0.0"]
-local = ["transformers>=4.40.0", "torch>=2.0.0"]
+local = ["transformers>=4.40.0", "torch>=2.0.0", "bitsandbytes>=0.43.0"]
 yaml = ["PyYAML>=6.0.0"]
 dev = ["pytest>=8.0.0"]
 app = ["streamlit>=1.36.0"]

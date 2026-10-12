@@ -87,5 +87,16 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(chunks[0].evidence_char_end, document.paragraphs[-1].char_end)
 
 
+    def test_pdf_parser_records_low_text_page_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "short.pdf"
+            path.write_bytes(b"%PDF-1.4\nBT (Climate.) Tj ET\n%%EOF")
+
+            document = parse_file(path)
+
+        self.assertIn(document.metadata["parse_status"], {"ok", "warning:low_text_pages"})
+        self.assertIn("parsed_page_count", document.metadata)
+
+
 if __name__ == "__main__":
     unittest.main()

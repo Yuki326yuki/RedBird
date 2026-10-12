@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .io_utils import read_jsonl, write_jsonl
+from .io_utils import read_jsonl, write_jsonl_atomic
 from .models import ModelBackend
 
 
@@ -23,11 +23,13 @@ class PolicyTranslator:
         prompt_path: Path,
         cache_path: Path,
         output_language: str = "English",
+        max_tokens: int | None = None,
     ) -> None:
         self.backend = backend
         self.prompt = prompt_path.read_text(encoding="utf-8").strip()
         self.cache_path = cache_path
         self.output_language = output_language
+        self.max_tokens = max_tokens
         self.cache: Dict[str, Dict[str, Any]] = {}
         if cache_path.exists():
             for row in read_jsonl(cache_path):
@@ -39,7 +41,7 @@ class PolicyTranslator:
         translated: List[Dict[str, Any]] = []
         for index, record in enumerate(records, start=1):
             translated.append(self.translate_record(record, index))
-        self.save_cache()
+            self.save_cache()
         return translated
 
     def translate_record(self, record: Dict[str, Any], index: int) -> Dict[str, Any]:
@@ -66,11 +68,13 @@ class PolicyTranslator:
                                 **payload,
                             },
                             ensure_ascii=False,
-                            indent=2,
+                            separators=(",", ":"),
                         ),
                     },
                 ],
                 schema_hint=", ".join(TRANSLATED_FIELDS.values()),
+                max_tokens=self.max_tokens,
+                stage="translation",
             )
             translated = {
                 target: normalize_text(response.get(target))
@@ -103,7 +107,7 @@ class PolicyTranslator:
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     def save_cache(self) -> None:
-        write_jsonl(self.cache_path, list(self.cache.values()))
+        write_jsonl_atomic(self.cache_path, list(self.cache.values()))
 
 
 def apply_translation(
@@ -132,4 +136,3 @@ def normalize_text(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
-

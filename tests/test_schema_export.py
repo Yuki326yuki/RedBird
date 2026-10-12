@@ -273,7 +273,7 @@ class TranslationTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 self.calls += 1
                 return {
                     "policy_title_en": "Climate Plan",
@@ -309,7 +309,7 @@ class TranslationTests(unittest.TestCase):
 
     def test_policy_translator_marks_errors_without_raising(self):
         class FailingBackend(ModelBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 raise RuntimeError("boom")
 
             def model_name(self):

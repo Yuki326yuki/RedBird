@@ -15,3 +15,5 @@ Return exactly these keys:
   "policy_content_en": "...",
   "policy_summary_en": "..."
 }
+
+Source documents may be in any language represented in the manifest. Preserve every verbatim quote and original policy passage in the source language.

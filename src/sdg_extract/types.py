@@ -47,6 +47,25 @@ class Chunk:
     evidence_char_start: int
     evidence_char_end: int
     metadata: Dict[str, Any] = field(default_factory=dict)
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def to_prompt_dict(self, include_text: bool = True) -> Dict[str, Any]:
+        data = {
+            "chunk_id": self.chunk_id,
+            "document_id": self.document_id,
+            "source_file": self.source_file,
+            "source_type": self.source_type,
+            "paragraph_ids": self.paragraph_ids,
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "evidence_char_start": self.evidence_char_start,
+            "evidence_char_end": self.evidence_char_end,
+            "metadata": self.metadata,
+        }
+        if include_text:
+            data["text"] = self.text
+        return data
