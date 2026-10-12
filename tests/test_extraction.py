@@ -1,10 +1,13 @@
 import io
+import json
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import redirect_stdout
 from pathlib import Path
 
 from sdg_extract.extraction import (
+    build_user_prompt,
     dedupe_records,
     extract_records,
     filter_strict_sdg13_records,
@@ -14,7 +17,7 @@ from sdg_extract.extraction import (
 )
 from sdg_extract.chunking import chunk_document
 from sdg_extract.io_utils import read_jsonl
-from sdg_extract.models import ModelBackend
+from sdg_extract.models import ModelBackend, ModelOutOfMemoryError
 from sdg_extract.models import HeuristicBackend
 from sdg_extract.parsers import parse_file
 from sdg_extract.review import RecordReviewer
@@ -23,6 +26,127 @@ from sdg_extract.targeting import SDG13TargetClassifier
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_country_file_balancing_interleaves_countries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chunks = []
+            for country in ["China", "United States", "Mexico"]:
+                for index in range(3):
+                    policy = root / f"{country}-{index}.txt"
+                    policy.write_text(
+                        "Climate adaptation strengthens resilience to climate hazards.",
+                        encoding="utf-8",
+                    )
+                    document = parse_file(
+                        policy,
+                        metadata={"country": country, "source_filename": policy.name},
+                    )
+                    chunks.extend(chunk_document(document, max_chars=1000))
+
+            selected = select_extraction_chunks(
+                chunks,
+                max_chunks=9,
+                sdg13_filter=True,
+                balance_by="country_file",
+            )
+
+        self.assertEqual(Counter(chunk.metadata["country"] for chunk in selected), {
+            "China": 3,
+            "Mexico": 3,
+            "United States": 3,
+        })
+
+    def test_policy_quota_stops_at_two_source_files_per_country(self):
+        class AcceptingBackend(HeuristicBackend):
+            def complete_json(self, messages, schema_hint, **kwargs):
+                return {
+                    "records": [
+                        {
+                            "policy_content_original": "Strengthen climate resilience.",
+                            "policy_content_summary": "Climate resilience action.",
+                            "sdg_goal": "SDG 13",
+                            "sdg_target": "13.1",
+                            "sdg_confidence": 0.9,
+                            "evidence_quote": "climate resilience",
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "system.md").write_text("System.", encoding="utf-8")
+            (prompt_dir / "extraction.md").write_text("Extract.", encoding="utf-8")
+            countries = ["China", "United States", "Mexico"]
+            chunks = []
+            for file_index in range(3):
+                for country in countries:
+                    policy = root / f"{country}-{file_index}.txt"
+                    policy.write_text("Strengthen climate resilience.", encoding="utf-8")
+                    document = parse_file(
+                        policy,
+                        metadata={
+                            "country": country,
+                            "policy_title": policy.stem,
+                            "source_filename": policy.name,
+                        },
+                    )
+                    chunks.extend(chunk_document(document, max_chars=1000))
+
+            records = extract_records(
+                [],
+                AcceptingBackend({"name": "accept"}),
+                prompt_dir,
+                max_chars=1000,
+                precomputed_chunks=chunks,
+                target_policies_per_country=2,
+                quota_countries=countries,
+                require_policy_quota=True,
+            )
+
+        sources = Counter((record["country"], record["source_file"]) for record in records)
+        per_country = Counter(country for country, _ in sources)
+        self.assertEqual(per_country, {"China": 2, "United States": 2, "Mexico": 2})
+
+    def test_extraction_prompt_contains_source_text_once(self):
+        prompt = build_user_prompt(
+            "Extract.",
+            "- policy_content_original",
+            {"chunk_id": "c1", "text": "UNIQUE_SOURCE_BODY", "metadata": {"country": "China"}},
+        )
+
+        self.assertEqual(prompt.count("UNIQUE_SOURCE_BODY"), 1)
+
+    def test_extraction_uses_stage_specific_token_limit(self):
+        class CapturingBackend(HeuristicBackend):
+            def __init__(self):
+                super().__init__({"name": "capture"})
+                self.options = None
+
+            def complete_json(self, messages, schema_hint, **kwargs):
+                self.options = kwargs
+                return {"records": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "system.md").write_text("System.", encoding="utf-8")
+            (prompt_dir / "extraction.md").write_text("Extract.", encoding="utf-8")
+            policy = root / "policy.txt"
+            policy.write_text("Climate adaptation policy.", encoding="utf-8")
+            backend = CapturingBackend()
+
+            extract_records(
+                [parse_file(policy)],
+                backend,
+                prompt_dir,
+                max_chars=1000,
+                extraction_max_tokens=512,
+            )
+
+        self.assertEqual(backend.options, {"max_tokens": 512, "stage": "extraction"})
     def test_heuristic_backend_uses_common_model_interface(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -114,7 +238,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_extract_records_continues_after_chunk_error(self):
         class FailingBackend(HeuristicBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 raise RuntimeError("boom")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,6 +264,107 @@ class ExtractionTests(unittest.TestCase):
 
             self.assertEqual(records, [])
             self.assertIn('"error_type": "RuntimeError"', errors_path.read_text(encoding="utf-8"))
+            checkpoint = json.loads((root / "checkpoint.json").read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["completed_chunks"], 0)
+            self.assertEqual(checkpoint["failed_chunks"], 1)
+
+    def test_extract_records_aborts_when_preflight_ooms(self):
+        class OomBackend(HeuristicBackend):
+            def complete_json(self, messages, schema_hint, **kwargs):
+                raise ModelOutOfMemoryError("CUDA out of memory after retry")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "system.md").write_text("Extract facts only.", encoding="utf-8")
+            (prompt_dir / "extraction.md").write_text("Return JSON.", encoding="utf-8")
+            policy = root / "policy.txt"
+            policy.write_text("The climate plan aligns with SDG 13.2.", encoding="utf-8")
+            document = parse_file(policy)
+            checkpoint_path = root / "checkpoint.json"
+
+            with self.assertRaisesRegex(RuntimeError, "preflight failed"):
+                extract_records(
+                    [document],
+                    OomBackend({"name": "oom"}),
+                    prompt_dir,
+                    max_chars=1000,
+                    checkpoint_path=checkpoint_path,
+                    errors_path=root / "errors.jsonl",
+                    preflight_chunks=1,
+                )
+
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["completed_chunks"], 0)
+            self.assertEqual(checkpoint["failed_chunks"], 1)
+
+    def test_failed_chunk_is_retried_on_next_run(self):
+        class RecoveringBackend(HeuristicBackend):
+            def __init__(self):
+                super().__init__({"name": "recovering"})
+                self.fail = True
+
+            def complete_json(self, messages, schema_hint, **kwargs):
+                if self.fail:
+                    raise RuntimeError("temporary failure")
+                return super().complete_json(messages, schema_hint)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "system.md").write_text("Extract facts only.", encoding="utf-8")
+            (prompt_dir / "extraction.md").write_text("Return JSON.", encoding="utf-8")
+            policy = root / "policy.txt"
+            policy.write_text("The climate plan aligns with SDG 13.2.", encoding="utf-8")
+            document = parse_file(policy)
+            backend = RecoveringBackend()
+            checkpoint_path = root / "checkpoint.json"
+            records_path = root / "records.jsonl"
+
+            first = extract_records(
+                [document], backend, prompt_dir, max_chars=1000,
+                records_path=records_path, checkpoint_path=checkpoint_path,
+            )
+            backend.fail = False
+            second = extract_records(
+                [document], backend, prompt_dir, max_chars=1000,
+                records_path=records_path, checkpoint_path=checkpoint_path,
+            )
+
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(first, [])
+            self.assertEqual(len(second), 1)
+            self.assertEqual(checkpoint["completed_chunks"], 1)
+            self.assertEqual(checkpoint["failed_chunks"], 0)
+
+    def test_consecutive_oom_limit_aborts_run(self):
+        class OomBackend(HeuristicBackend):
+            def complete_json(self, messages, schema_hint, **kwargs):
+                raise ModelOutOfMemoryError("CUDA out of memory after retry")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "system.md").write_text("Extract facts only.", encoding="utf-8")
+            (prompt_dir / "extraction.md").write_text("Return JSON.", encoding="utf-8")
+            documents = []
+            for index in range(2):
+                policy = root / f"policy-{index}.txt"
+                policy.write_text("The climate plan aligns with SDG 13.2.", encoding="utf-8")
+                documents.append(parse_file(policy))
+
+            with self.assertRaisesRegex(RuntimeError, "2 consecutive CUDA OOM"):
+                extract_records(
+                    documents,
+                    OomBackend({"name": "oom"}),
+                    prompt_dir,
+                    max_chars=1000,
+                    checkpoint_path=root / "checkpoint.json",
+                    max_consecutive_oom=2,
+                )
 
     def test_extract_records_respects_max_chunks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,7 +453,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_record_reviewer_accepts_supported_record(self):
         class AcceptBackend(ModelBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 return {
                     "decision": "accept",
                     "review_confidence": 0.91,
@@ -258,7 +483,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_record_reviewer_rejects_unsupported_record(self):
         class RejectBackend(ModelBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 return {
                     "decision": "reject",
                     "review_confidence": 0.2,
@@ -287,7 +512,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_record_reviewer_applies_valid_revision(self):
         class ReviseBackend(ModelBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 return {
                     "decision": "revise",
                     "review_confidence": 0.84,
@@ -322,7 +547,7 @@ class ExtractionTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 self.calls += 1
                 return {
                     "decision": "accept",
@@ -352,7 +577,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_record_reviewer_failure_rejects_and_logs_error(self):
         class FailingBackend(ModelBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 raise RuntimeError("boom")
 
             def model_name(self):
@@ -405,7 +630,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_target_classifier_requires_target_specific_support(self):
         class NeverCalledBackend(ModelBackend):
-            def complete_json(self, messages, schema_hint):
+            def complete_json(self, messages, schema_hint, **kwargs):
                 raise AssertionError("cache-free apply_assessments should not call backend")
 
             def model_name(self):

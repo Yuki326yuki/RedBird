@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .io_utils import read_jsonl, write_jsonl
-from .models import ModelBackend
+from .models import ModelBackend, ModelOutOfMemoryError
 from .schema import normalize_records
 from .targeting import evidence_is_traceable
 from .types import Chunk
@@ -32,6 +32,7 @@ class RecordReviewer:
         keep_rejected: bool = False,
         min_confidence: float = 0.75,
         enforce_traceable_evidence: bool = False,
+        max_tokens: int | None = None,
     ) -> None:
         self.backend = backend
         self.prompt = prompt_path.read_text(encoding="utf-8").strip()
@@ -39,6 +40,7 @@ class RecordReviewer:
         self.keep_rejected = keep_rejected
         self.min_confidence = float(min_confidence)
         self.enforce_traceable_evidence = bool(enforce_traceable_evidence)
+        self.max_tokens = max_tokens
         self.prompt_hash = hashlib.sha1(self.prompt.encode("utf-8")).hexdigest()[:12]
         self.cache: Dict[str, Dict[str, Any]] = {}
         if cache_path.exists():
@@ -97,18 +99,22 @@ class RecordReviewer:
                             {
                                 "record_index": index,
                                 "allowed_sdg_targets": sorted(SDG13_TARGETS),
-                                "chunk": chunk.to_dict(),
-                                "candidate_record": record,
+                                "chunk": chunk.to_prompt_dict(),
+                                "candidate_record": compact_review_record(record),
                             },
                             ensure_ascii=False,
-                            indent=2,
+                            separators=(",", ":"),
                             sort_keys=True,
                         ),
                     },
                 ],
                 schema_hint="decision, review_confidence, rejection_reason, revised_record",
+                max_tokens=self.max_tokens,
+                stage="review",
             )
             review_row = self.normalize_response(cache_key, chunk, record, response)
+        except ModelOutOfMemoryError:
+            raise
         except Exception as exc:
             review_row = self.error_response(cache_key, chunk, record, exc)
             append_jsonl(
@@ -268,6 +274,20 @@ def normalize_text(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def compact_review_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    fields = [
+        "country",
+        "policy_title",
+        "policy_content_original",
+        "policy_content_summary",
+        "sdg_goal",
+        "sdg_target",
+        "sdg_confidence",
+        "evidence_quote",
+    ]
+    return {field: record.get(field) for field in fields}
 
 
 def append_jsonl(path: Optional[Path], row: Dict[str, Any]) -> None:

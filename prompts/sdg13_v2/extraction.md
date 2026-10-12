@@ -1,5 +1,7 @@
 Return a JSON object with a top-level "records" array.
 
+Return at most two records for this chunk. Prefer fewer, stronger records over overlapping fragments.
+
 Extract only explicit policy measures that directly concern climate change, greenhouse-gas mitigation, climate adaptation, resilience, climate hazards, climate education, climate finance, NDCs, UNFCCC, or the Paris Agreement.
 
 For each record return only:

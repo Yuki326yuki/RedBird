@@ -30,12 +30,14 @@ class SDG13TargetClassifier:
         prompt_path: Path,
         cache_path: Path,
         min_confidence: float = 0.75,
+        max_tokens: int | None = None,
     ) -> None:
         self.backend = backend
         self.prompt = prompt_path.read_text(encoding="utf-8").strip()
         self.prompt_hash = hashlib.sha1(self.prompt.encode("utf-8")).hexdigest()[:12]
         self.cache_path = cache_path
         self.min_confidence = float(min_confidence)
+        self.max_tokens = max_tokens
         self.cache: Dict[str, Dict[str, Any]] = {}
         if cache_path.exists():
             for row in read_jsonl(cache_path):
@@ -56,15 +58,17 @@ class SDG13TargetClassifier:
                             "content": json.dumps(
                                 {
                                     "target_definitions": SDG13_TARGET_DEFINITIONS,
-                                    "source_chunk": chunk.to_dict(),
-                                    "candidate": candidate,
+                                    "source_chunk": chunk.to_prompt_dict(),
+                                    "candidate": compact_candidate(candidate),
                                 },
                                 ensure_ascii=False,
-                                indent=2,
+                                separators=(",", ":"),
                             ),
                         },
                     ],
                     schema_hint="assessments: sdg_target, decision, confidence, evidence_quote, reason",
+                    max_tokens=self.max_tokens,
+                    stage="target_classification",
                 )
                 row = {
                     "cache_key": cache_key,
@@ -164,3 +168,8 @@ def normalize_confidence(value: Any) -> float | None:
 def normalize_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def compact_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    fields = ["policy_content_original", "policy_content_summary", "evidence_quote"]
+    return {field: candidate.get(field) for field in fields}

@@ -6,12 +6,22 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from .cache import (
+    cache_matches,
+    chunk_cache_fingerprint,
+    document_cache_fingerprint,
+    document_sources_match,
+    load_chunks,
+    save_cache_meta,
+    save_chunks,
+    save_documents,
+)
 from .chunking import chunk_documents
 from .config import load_config, resolve_path
 from .database import build_database, database_summary, query_policies
 from .exporters import export_records
 from .extraction import extract_records, load_documents, load_extracted_records, save_extracted_records
-from .io_utils import ensure_dir, write_json, write_jsonl
+from .io_utils import ensure_dir, write_json, write_jsonl, write_jsonl_atomic
 from .manifest import load_manifest_selection
 from .models import ModelBackend
 from .models import build_backend
@@ -20,6 +30,7 @@ from .quality import target_distribution_report
 from .review import RecordReviewer
 from .targeting import SDG13TargetClassifier
 from .translation import PolicyTranslator
+from .types import Chunk, Document
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -42,8 +53,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     export_parser.add_argument("--format", default="jsonl,csv")
 
     db_build_parser = subparsers.add_parser("db-build", help="Build a SQLite database from exported records.")
-    db_build_parser.add_argument("--input", required=True, type=Path)
-    db_build_parser.add_argument("--db", required=True, type=Path)
+    db_build_parser.add_argument("--input", type=Path)
+    db_build_parser.add_argument("--db", type=Path)
     db_build_parser.add_argument("--passages", type=Path)
     db_build_parser.add_argument("--config", type=Path)
 
@@ -110,20 +121,12 @@ def run_extract(config_path: Path) -> int:
     project_root = infer_project_root(config_path)
     paths = config["paths"]
     workdir = resolve_path(paths["workdir"], project_root)
-    documents_path = workdir / "documents.jsonl"
-    if not documents_path.exists():
-        input_dir = resolve_path(paths["input_dir"], project_root)
-        allowed_paths, metadata_by_path = manifest_selection_for_config(config, project_root)
-        run_ingest(
-            input_dir,
-            workdir,
-            int(config["chunking"]["max_chars"]),
-            int(config["chunking"].get("overlap_chars", 0)),
-            allowed_paths=allowed_paths,
-            metadata_by_path=metadata_by_path,
-        )
-    documents = load_documents(documents_path)
+    documents, cached_chunks, documents_path, chunks_path = prepare_extraction_inputs(
+        config, project_root, workdir
+    )
     print(f"[INFO] Loaded {len(documents)} documents from {documents_path}", flush=True)
+    if cached_chunks is not None:
+        print(f"[INFO] Loaded {len(cached_chunks)} chunks from {chunks_path}", flush=True)
     print(
         f"[INFO] Loading model backend: {config['model'].get('backend')} "
         f"name={config['model'].get('name')}",
@@ -131,42 +134,191 @@ def run_extract(config_path: Path) -> int:
     )
     backend = build_backend(config["model"])
     print(f"[INFO] Model backend ready: {backend.model_name()}", flush=True)
-    target_classifier = build_target_classifier_for_config(config, project_root, workdir, backend)
-    reviewer = build_reviewer_for_config(config, project_root, workdir, backend)
-    prompt_dir = resolve_path(paths.get("prompt_dir", "prompts"), project_root)
-    records_path = workdir / "records.jsonl"
-    experiment = config.get("experiment", {})
-    records = extract_records(
-        documents=documents,
-        backend=backend,
-        prompt_dir=prompt_dir,
-        max_chars=int(config["chunking"]["max_chars"]),
-        overlap_chars=int(config["chunking"].get("overlap_chars", 0)),
-        records_path=records_path,
-        checkpoint_path=workdir / "checkpoint.json",
-        errors_path=workdir / "errors.jsonl",
-        max_chunks=experiment.get("max_chunks"),
-        sdg13_filter=bool(experiment.get("sdg13_filter", False)),
-        strict_sdg13=bool(experiment.get("strict_sdg13", False)),
-        balance_by=experiment.get("balance_by"),
-        neighbor_chunks=int(experiment.get("neighbor_chunks", 0)),
-        reviewer=reviewer,
-        target_classifier=target_classifier,
+    target_classifier: Optional[SDG13TargetClassifier] = None
+    reviewer: Optional[RecordReviewer] = None
+    try:
+        target_classifier = build_target_classifier_for_config(config, project_root, workdir, backend)
+        reviewer = build_reviewer_for_config(config, project_root, workdir, backend)
+        prompt_dir = resolve_path(paths.get("prompt_dir", "prompts"), project_root)
+        records_path = workdir / "records.jsonl"
+        experiment = config.get("experiment", {})
+        records = extract_records(
+            documents=documents,
+            backend=backend,
+            prompt_dir=prompt_dir,
+            max_chars=int(config["chunking"]["max_chars"]),
+            overlap_chars=int(config["chunking"].get("overlap_chars", 0)),
+            records_path=records_path,
+            checkpoint_path=workdir / "checkpoint.json",
+            errors_path=workdir / "errors.jsonl",
+            max_chunks=experiment.get("max_chunks"),
+            sdg13_filter=bool(experiment.get("sdg13_filter", False)),
+            strict_sdg13=bool(experiment.get("strict_sdg13", False)),
+            balance_by=experiment.get("balance_by"),
+            neighbor_chunks=int(experiment.get("neighbor_chunks", 0)),
+            reviewer=reviewer,
+            target_classifier=target_classifier,
+            max_consecutive_oom=int(experiment.get("max_consecutive_oom", 3)),
+            preflight_chunks=int(experiment.get("preflight_chunks", 0)),
+            preflight_max_seconds_per_chunk=float(
+                experiment.get("preflight_max_seconds_per_chunk", 0)
+            ),
+            fail_on_chunk_errors=bool(experiment.get("fail_on_chunk_errors", False)),
+            precomputed_chunks=cached_chunks,
+            extraction_max_tokens=int(config["model"].get("max_tokens", 512)),
+            target_policies_per_country=int(
+                experiment.get("target_policies_per_country", 0)
+            ),
+            quota_countries=[str(country) for country in config.get("countries") or []],
+            require_policy_quota=bool(experiment.get("require_policy_quota", False)),
+        )
+        save_extracted_records(records_path, records)
+        quality_report = target_distribution_report(records)
+        quality_path = workdir / "quality_report.json"
+        write_json(quality_path, quality_report)
+        print(f"Extracted {len(records)} records.")
+        print(f"Wrote {workdir / 'records.jsonl'}")
+        print(
+            f"[QUALITY] targets={quality_report['target_counts']} "
+            f"dominant={quality_report['dominant_target']}:{quality_report['dominant_share']:.1%} "
+            f"warnings={quality_report['warnings']}",
+            flush=True,
+        )
+        print(f"Wrote {quality_path}")
+        minimum_records = int(experiment.get("min_records", 0))
+        if len(records) < minimum_records:
+            raise RuntimeError(
+                f"Extraction produced {len(records)} records, below required minimum {minimum_records}."
+            )
+        return 0
+    finally:
+        close_backends(backend, target_classifier, reviewer)
+
+
+def prepare_extraction_inputs(
+    config: dict,
+    project_root: Path,
+    workdir: Path,
+) -> Tuple[List[Document], Optional[List[Chunk]], Path, Path]:
+    """Load validated shared parse/chunk caches, rebuilding only stale stages."""
+    ensure_dir(workdir)
+    paths = config["paths"]
+    input_dir = resolve_path(paths["input_dir"], project_root)
+    cache_config = config.get("cache") or {}
+    if not cache_config.get("enabled"):
+        documents_path = workdir / "documents.jsonl"
+        chunks_path = workdir / "chunks.jsonl"
+        if not documents_path.exists():
+            allowed_paths, metadata_by_path = manifest_selection_for_config(config, project_root)
+            run_ingest(
+                input_dir,
+                workdir,
+                int(config["chunking"]["max_chars"]),
+                int(config["chunking"].get("overlap_chars", 0)),
+                allowed_paths=allowed_paths,
+                metadata_by_path=metadata_by_path,
+            )
+        return load_documents(documents_path), None, documents_path, chunks_path
+
+    allowed_paths, metadata_by_path = manifest_selection_for_config(config, project_root)
+    if allowed_paths is None:
+        raise ValueError("Shared document caching requires manifest_path in the config.")
+    manifest_value = config.get("manifest_path")
+    manifest_path = resolve_path(str(manifest_value), project_root) if manifest_value else None
+    document_fingerprint = document_cache_fingerprint(
+        allowed_paths,
+        metadata_by_path,
+        config.get("countries") or [],
+        manifest_path,
     )
-    save_extracted_records(records_path, records)
-    quality_report = target_distribution_report(records)
-    quality_path = workdir / "quality_report.json"
-    write_json(quality_path, quality_report)
-    print(f"Extracted {len(records)} records.")
-    print(f"Wrote {workdir / 'records.jsonl'}")
-    print(
-        f"[QUALITY] targets={quality_report['target_counts']} "
-        f"dominant={quality_report['dominant_target']}:{quality_report['dominant_share']:.1%} "
-        f"warnings={quality_report['warnings']}",
-        flush=True,
+    documents_path = resolve_path(
+        str(cache_config.get("documents_path") or "data/cache/documents.jsonl"),
+        project_root,
     )
-    print(f"Wrote {quality_path}")
-    return 0
+    documents_meta_path = resolve_path(
+        str(cache_config.get("documents_meta_path") or documents_path.with_name("documents.meta.json")),
+        project_root,
+    )
+    if cache_matches(documents_meta_path, documents_path, document_fingerprint):
+        documents = load_documents(documents_path)
+        print("[CACHE] documents hit; PDF parsing skipped.", flush=True)
+    else:
+        documents: List[Document] = []
+        seed_value = cache_config.get("seed_documents_path")
+        seed_path = resolve_path(str(seed_value), project_root) if seed_value else None
+        if seed_path and seed_path.exists():
+            seed_documents = load_documents(seed_path)
+            if document_sources_match(seed_documents, allowed_paths):
+                documents = seed_documents
+                print(
+                    f"[CACHE] Migrating {len(documents)} validated documents from {seed_path}; "
+                    "PDF parsing skipped.",
+                    flush=True,
+                )
+            else:
+                print("[CACHE] Seed documents do not match current sources; reparsing PDFs.", flush=True)
+        if not documents:
+            documents = parse_directory(
+                input_dir,
+                allowed_paths=allowed_paths,
+                metadata_by_path=metadata_by_path,
+                show_progress=True,
+            )
+        if not document_sources_match(documents, allowed_paths):
+            raise RuntimeError("Parsed document set does not match the current manifest selection.")
+        save_documents(documents_path, documents)
+        save_cache_meta(
+            documents_meta_path,
+            document_fingerprint,
+            document_count=len(documents),
+            countries=config.get("countries") or [],
+        )
+        write_jsonl_atomic(
+            documents_path.with_name("parse_warnings.jsonl"),
+            parse_warning_rows(documents),
+        )
+        print(f"[CACHE] Wrote shared document cache: {documents_path}", flush=True)
+
+    max_chars = int(config["chunking"]["max_chars"])
+    overlap_chars = int(config["chunking"].get("overlap_chars", 0))
+    chunk_fingerprint = chunk_cache_fingerprint(document_fingerprint, max_chars, overlap_chars)
+    chunks_path = resolve_path(
+        str(cache_config.get("chunks_path") or documents_path.with_name("chunks.jsonl")),
+        project_root,
+    )
+    chunks_meta_path = resolve_path(
+        str(cache_config.get("chunks_meta_path") or chunks_path.with_name("chunks.meta.json")),
+        project_root,
+    )
+    if cache_matches(chunks_meta_path, chunks_path, chunk_fingerprint):
+        chunks = load_chunks(chunks_path)
+        print("[CACHE] chunks hit; document splitting skipped.", flush=True)
+    else:
+        chunks = chunk_documents(documents, max_chars=max_chars, overlap_chars=overlap_chars)
+        save_chunks(chunks_path, chunks)
+        save_cache_meta(
+            chunks_meta_path,
+            chunk_fingerprint,
+            chunk_count=len(chunks),
+            max_chars=max_chars,
+            overlap_chars=overlap_chars,
+            document_fingerprint=document_fingerprint,
+        )
+        print(f"[CACHE] Wrote shared chunk cache: {chunks_path}", flush=True)
+    return documents, chunks, documents_path, chunks_path
+
+
+def parse_warning_rows(documents: List[Document]) -> List[Dict[str, object]]:
+    return [
+        {
+            "document_id": document.document_id,
+            "source_file": document.source_file,
+            "parse_status": document.metadata.get("parse_status"),
+            "low_text_pages": document.metadata.get("low_text_pages", []),
+        }
+        for document in documents
+        if str(document.metadata.get("parse_status") or "ok") != "ok"
+    ]
 
 
 def manifest_selection_for_config(config: dict, project_root: Path) -> Tuple[Optional[Set[Path]], Dict[Path, Dict[str, object]]]:
@@ -204,7 +356,11 @@ def run_export_command(
         workdir = workdir_arg or Path("data/work")
         output_dir = output_arg or Path("data/output")
     translator = build_translator_for_config(config, project_root, workdir) if config_path else None
-    return run_export(workdir, output_dir, formats, translator=translator)
+    try:
+        return run_export(workdir, output_dir, formats, translator=translator)
+    finally:
+        if translator is not None:
+            translator.backend.close()
 
 
 
@@ -237,6 +393,7 @@ def build_target_classifier_for_config(
         prompt_path=prompt_path,
         cache_path=cache_path,
         min_confidence=float(classifier_config.get("min_confidence", 0.75)),
+        max_tokens=int(model_config.get("max_tokens", 700)),
     )
 
 def build_reviewer_for_config(
@@ -277,12 +434,54 @@ def build_reviewer_for_config(
         keep_rejected=bool(review_config.get("keep_rejected", False)),
         min_confidence=float(review_config.get("min_confidence", 0.75)),
         enforce_traceable_evidence=bool(review_config.get("enforce_traceable_evidence", False)),
+        max_tokens=int(model_config.get("max_tokens", 350)),
     )
 
 
 def same_model_config(left: dict, right: dict) -> bool:
-    keys = ["backend", "name", "local_model_path", "api_base", "api_key_env"]
-    return all(str(left.get(key) or "") == str(right.get(key) or "") for key in keys)
+    left_backend = str(left.get("backend") or "api")
+    right_backend = str(right.get("backend") or "api")
+    if left_backend != right_backend:
+        return False
+    if left_backend == "local_transformers":
+        keys = [
+            "name", "local_model_path", "torch_dtype", "attn_implementation",
+        ]
+    else:
+        keys = [
+            "name", "api_base", "api_key_env", "api_protocol", "temperature",
+            "max_tokens", "json_mode", "reasoning_effort",
+        ]
+    if not all(str(left.get(key) or "") == str(right.get(key) or "") for key in keys):
+        return False
+    return left_backend != "local_transformers" or (
+        normalized_quantization(left) == normalized_quantization(right)
+    )
+
+
+def normalized_quantization(config: dict) -> str:
+    value = config.get("quantization") or {}
+    if isinstance(value, dict):
+        value = value.get("mode", "none")
+    return str(value or "none").strip().lower()
+
+
+def close_backends(
+    extraction_backend: ModelBackend,
+    target_classifier: Optional[SDG13TargetClassifier],
+    reviewer: Optional[RecordReviewer],
+) -> None:
+    backends = [
+        extraction_backend,
+        getattr(target_classifier, "backend", None),
+        getattr(reviewer, "backend", None),
+    ]
+    closed = set()
+    for backend in backends:
+        if backend is None or id(backend) in closed:
+            continue
+        closed.add(id(backend))
+        backend.close()
 
 
 def build_translator_for_config(config: dict, project_root: Path, workdir: Path) -> Optional[PolicyTranslator]:
@@ -312,6 +511,7 @@ def build_translator_for_config(config: dict, project_root: Path, workdir: Path)
         prompt_path=prompt_path,
         cache_path=cache_path,
         output_language=str(translation_config.get("output_language") or "English"),
+        max_tokens=int(model_config.get("max_tokens", 1800)),
     )
 
 
@@ -332,13 +532,29 @@ def run_export(
 
 
 def run_db_build(
-    input_path: Path,
-    db_path: Path,
+    input_path: Optional[Path],
+    db_path: Optional[Path],
     passages_path: Optional[Path] = None,
     config_path: Optional[Path] = None,
 ) -> int:
     if config_path:
-        load_config(config_path)
+        config = load_config(config_path)
+        project_root = infer_project_root(config_path)
+        paths = config["paths"]
+        output_dir = resolve_path(paths.get("output_dir", "data/output"), project_root)
+        workdir = resolve_path(paths.get("workdir", "data/work"), project_root)
+        database_config = config.get("database") or {}
+        chatbot_config = config.get("chatbot") or {}
+        if input_path is None:
+            input_path = output_dir / "records.jsonl"
+        if passages_path is None:
+            passages_path = workdir / "records.jsonl"
+        if db_path is None:
+            db_value = database_config.get("db_path") or chatbot_config.get("db_path")
+            if db_value:
+                db_path = resolve_path(str(db_value), project_root)
+    if input_path is None or db_path is None:
+        raise ValueError("db-build requires --input and --db unless --config supplies their paths.")
     count = build_database(input_path, db_path, passages_path=passages_path)
     summary = database_summary(db_path)
     print(f"Imported {count} policy records and {summary.get('passages', 0)} passages.")

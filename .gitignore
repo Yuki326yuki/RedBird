@@ -7,6 +7,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+logs/
 
 # OS and editor files
 .DS_Store
@@ -21,6 +22,7 @@ htmlcov/
 
 # Runtime data and generated artifacts
 data/db/
+data/cache/
 data/work/*
 data/output/*
 !data/work/.gitkeep

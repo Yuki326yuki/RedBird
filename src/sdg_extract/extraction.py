@@ -5,11 +5,11 @@ import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from .chunking import chunk_documents
 from .io_utils import read_jsonl, write_jsonl
-from .models import ModelBackend
+from .models import ModelBackend, ModelOutOfMemoryError
 from .multilingual import CLIMATE_TERMS, TARGET_TERMS
 from .review import RecordReviewer
 from .schema import OUTPUT_FIELDS, evidence_candidate_schema_prompt, normalize_records, output_schema_prompt
@@ -56,11 +56,24 @@ def extract_records(
     neighbor_chunks: int = 0,
     reviewer: Optional[RecordReviewer] = None,
     target_classifier: Optional[SDG13TargetClassifier] = None,
+    max_consecutive_oom: int = 3,
+    preflight_chunks: int = 0,
+    fail_on_chunk_errors: bool = False,
+    preflight_max_seconds_per_chunk: float = 0,
+    precomputed_chunks: Optional[List[Chunk]] = None,
+    extraction_max_tokens: Optional[int] = None,
+    target_policies_per_country: int = 0,
+    quota_countries: Optional[List[str]] = None,
+    require_policy_quota: bool = False,
 ) -> List[Dict[str, Any]]:
     system_prompt = read_prompt(prompt_dir / "system.md")
     extraction_prompt = read_prompt(prompt_dir / "extraction.md")
     schema_hint = evidence_candidate_schema_prompt() if target_classifier else output_schema_prompt()
-    all_chunks = chunk_documents(documents, max_chars=max_chars, overlap_chars=overlap_chars)
+    all_chunks = (
+        list(precomputed_chunks)
+        if precomputed_chunks is not None
+        else chunk_documents(documents, max_chars=max_chars, overlap_chars=overlap_chars)
+    )
     chunks = select_extraction_chunks(
         all_chunks,
         max_chunks=max_chunks,
@@ -69,21 +82,42 @@ def extract_records(
         neighbor_chunks=neighbor_chunks,
     )
     total_chunks = len(chunks)
-    completed_chunks = load_completed_chunks(checkpoint_path)
+    completed_chunk_ids, failed_chunk_ids = load_checkpoint_state(checkpoint_path, chunks)
     records = load_extracted_records(records_path) if records_path and records_path.exists() else []
     if strict_sdg13:
         records = dedupe_records(filter_strict_sdg13_records(records))
+    required_countries = [str(country) for country in (quota_countries or [])]
+    policy_sources = policy_sources_by_country(records, required_countries)
+    if target_policies_per_country and policy_quota_met(
+        policy_sources, required_countries, target_policies_per_country
+    ):
+        print(
+            f"[QUOTA] Already satisfied: {format_policy_quota(policy_sources, required_countries)}",
+            flush=True,
+        )
+        return records
     started_at = time.time()
     if total_chunks:
         print(
             f"[PROGRESS] Starting extraction: {total_chunks} chunks "
-            f"(source_chunks={len(all_chunks)}, resume_from={completed_chunks + 1}, "
+            f"(source_chunks={len(all_chunks)}, completed={len(completed_chunk_ids)}, "
+            f"failed={len(failed_chunk_ids)}, "
             f"existing_records={len(records)}, sdg13_filter={sdg13_filter}, strict={strict_sdg13})",
             flush=True,
         )
+    consecutive_oom = 0
+    preflight_attempts = 0
     for index, chunk in enumerate(chunks, start=1):
-        if index <= completed_chunks:
+        if chunk.chunk_id in completed_chunk_ids:
             continue
+        chunk_country = str(chunk.metadata.get("country") or "")
+        if (
+            target_policies_per_country
+            and chunk_country in required_countries
+            and len(policy_sources.get(chunk_country, set())) >= target_policies_per_country
+        ):
+            continue
+        preflight_attempts += 1
         chunk_started_at = time.time()
         try:
             normalized = extract_chunk_records(
@@ -94,6 +128,7 @@ def extract_records(
                 schema_hint=schema_hint,
                 strict_sdg13=strict_sdg13,
                 target_classifier=target_classifier,
+                max_tokens=extraction_max_tokens,
             )
             if reviewer:
                 before_review = len(normalized)
@@ -105,30 +140,60 @@ def extract_records(
                     flush=True,
                 )
         except Exception as exc:
-            normalized = []
+            failed_chunk_ids.add(chunk.chunk_id)
+            oom_error = is_cuda_oom_error(exc)
+            consecutive_oom = consecutive_oom + 1 if oom_error else 0
             append_jsonl(
                 errors_path,
                 {
                     "chunk_index": index,
                     "chunk_id": chunk.chunk_id,
-        "language": chunk.metadata.get("language"),
+                    "language": chunk.metadata.get("language"),
                     "source_file": chunk.source_file,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "retryable": True,
                 },
+            )
+            save_checkpoint(
+                checkpoint_path,
+                completed_chunk_ids,
+                failed_chunk_ids,
+                total_chunks,
+                len(records),
             )
             print(
                 "[ERROR] "
-                f"chunk {index}/{total_chunks} failed; recorded error and continuing. "
+                f"chunk {index}/{total_chunks} failed; it remains pending for the next run. "
                 f"error={type(exc).__name__}: {exc}",
                 flush=True,
             )
+            if preflight_chunks and preflight_attempts <= preflight_chunks:
+                raise RuntimeError(
+                    f"Model preflight failed at attempt {preflight_attempts}/{preflight_chunks}: "
+                    f"{type(exc).__name__}."
+                ) from exc
+            if oom_error and consecutive_oom >= max(1, int(max_consecutive_oom)):
+                raise RuntimeError(
+                    f"Aborting after {consecutive_oom} consecutive CUDA OOM failures."
+                ) from exc
+            continue
+        consecutive_oom = 0
+        completed_chunk_ids.add(chunk.chunk_id)
+        failed_chunk_ids.discard(chunk.chunk_id)
         records.extend(normalized)
         if strict_sdg13:
             records = dedupe_records(filter_strict_sdg13_records(records))
+        policy_sources = policy_sources_by_country(records, required_countries)
         if records_path:
             save_extracted_records(records_path, records)
-        save_checkpoint(checkpoint_path, index, total_chunks, len(records))
+        save_checkpoint(
+            checkpoint_path,
+            completed_chunk_ids,
+            failed_chunk_ids,
+            total_chunks,
+            len(records),
+        )
         elapsed = time.time() - started_at
         chunk_elapsed = time.time() - chunk_started_at
         percent = index / total_chunks * 100 if total_chunks else 100.0
@@ -140,6 +205,45 @@ def extract_records(
             f"source={chunk.source_file}",
             flush=True,
         )
+        if (
+            preflight_chunks
+            and preflight_attempts <= preflight_chunks
+            and preflight_max_seconds_per_chunk > 0
+            and chunk_elapsed > preflight_max_seconds_per_chunk
+        ):
+            raise RuntimeError(
+                f"Speed preflight failed: chunk {index} took {chunk_elapsed:.1f}s, "
+                f"above limit {preflight_max_seconds_per_chunk:.1f}s."
+            )
+        if preflight_chunks and preflight_attempts == preflight_chunks:
+            print(
+                f"[PREFLIGHT] Passed {preflight_chunks} chunks without CUDA OOM; continuing full run.",
+                flush=True,
+            )
+        if target_policies_per_country and policy_quota_met(
+            policy_sources, required_countries, target_policies_per_country
+        ):
+            print(
+                f"[QUOTA] Reached policy quota: "
+                f"{format_policy_quota(policy_sources, required_countries)}",
+                flush=True,
+            )
+            break
+    if fail_on_chunk_errors and failed_chunk_ids:
+        raise RuntimeError(
+            f"Extraction finished with {len(failed_chunk_ids)} retryable failed chunks; "
+            "rerun after resolving the logged errors."
+        )
+    if target_policies_per_country and not policy_quota_met(
+        policy_sources, required_countries, target_policies_per_country
+    ):
+        message = (
+            f"Policy quota not reached ({target_policies_per_country} per country): "
+            f"{format_policy_quota(policy_sources, required_countries)}"
+        )
+        if require_policy_quota:
+            raise RuntimeError(message)
+        print(f"[WARN] {message}", flush=True)
     return records
 
 
@@ -194,15 +298,46 @@ def round_robin_scored_chunks(scored: List[Tuple[Chunk, str, float]]) -> List[Ch
             target,
         )
         groups[key].append((chunk, score))
-    queues: Deque[Tuple[str, str, str]] = deque(sorted(groups))
+    country_groups: Dict[str, Deque[Tuple[str, str, str]]] = defaultdict(deque)
+    for key in sorted(groups):
+        country_groups[key[0]].append(key)
+    countries: Deque[str] = deque(sorted(country_groups))
     ordered: List[Chunk] = []
-    while queues:
-        key = queues.popleft()
+    while countries:
+        country = countries.popleft()
+        key = country_groups[country].popleft()
         chunk, _ = groups[key].popleft()
         ordered.append(chunk)
         if groups[key]:
-            queues.append(key)
+            country_groups[country].append(key)
+        if country_groups[country]:
+            countries.append(country)
     return ordered
+
+
+def policy_sources_by_country(
+    records: List[Dict[str, Any]],
+    countries: List[str],
+) -> Dict[str, Set[str]]:
+    sources: Dict[str, Set[str]] = {country: set() for country in countries}
+    for record in records:
+        country = str(record.get("country") or "")
+        source = str(record.get("source_file") or "")
+        if country in sources and source:
+            sources[country].add(source)
+    return sources
+
+
+def policy_quota_met(
+    sources: Dict[str, Set[str]],
+    countries: List[str],
+    target: int,
+) -> bool:
+    return bool(countries) and all(len(sources.get(country, set())) >= target for country in countries)
+
+
+def format_policy_quota(sources: Dict[str, Set[str]], countries: List[str]) -> str:
+    return ", ".join(f"{country}={len(sources.get(country, set()))}" for country in countries)
 
 
 def include_neighbor_chunks(
@@ -261,6 +396,7 @@ def extract_chunk_records(
     schema_hint: str,
     strict_sdg13: bool = False,
     target_classifier: Optional[SDG13TargetClassifier] = None,
+    max_tokens: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     messages = [
         {"role": "system", "content": system_prompt},
@@ -269,7 +405,12 @@ def extract_chunk_records(
             "content": build_user_prompt(extraction_prompt, schema_hint, chunk.to_dict()),
         },
     ]
-    response = backend.complete_json(messages, schema_hint=schema_hint)
+    response = backend.complete_json(
+        messages,
+        schema_hint=schema_hint,
+        max_tokens=max_tokens,
+        stage="extraction",
+    )
     raw_records = response.get("records", [])
     if not isinstance(raw_records, list):
         raise ValueError("Model JSON must contain a list field named 'records'.")
@@ -382,34 +523,62 @@ def normalize_space(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
-def load_completed_chunks(path: Optional[Path]) -> int:
+def load_checkpoint_state(
+    path: Optional[Path],
+    chunks: List[Chunk],
+) -> Tuple[Set[str], Set[str]]:
     if not path or not path.exists():
-        return 0
+        return set(), set()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return int(data.get("completed_chunks", 0))
+        completed_values = data.get("completed_chunk_ids")
+        failed_values = data.get("failed_chunk_ids")
+        if isinstance(completed_values, list):
+            completed = {str(value) for value in completed_values}
+        else:
+            legacy_count = max(0, int(data.get("completed_chunks", 0)))
+            completed = {chunk.chunk_id for chunk in chunks[:legacy_count]}
+        failed = {str(value) for value in failed_values} if isinstance(failed_values, list) else set()
+        return completed, failed
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return 0
+        return set(), set()
 
 
-def save_checkpoint(path: Optional[Path], completed_chunks: int, total_chunks: int, total_records: int) -> None:
+def save_checkpoint(
+    path: Optional[Path],
+    completed_chunk_ids: Set[str],
+    failed_chunk_ids: Set[str],
+    total_chunks: int,
+    total_records: int,
+) -> None:
     if not path:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "completed_chunks": completed_chunks,
-                "total_chunks": total_chunks,
-                "total_records": total_records,
-                "updated_at": time.time(),
-            },
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    payload = json.dumps(
+        {
+            "completed_chunks": len(completed_chunk_ids),
+            "completed_chunk_ids": sorted(completed_chunk_ids),
+            "failed_chunks": len(failed_chunk_ids),
+            "failed_chunk_ids": sorted(failed_chunk_ids),
+            "total_chunks": total_chunks,
+            "total_records": total_records,
+            "updated_at": time.time(),
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
     )
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(payload, encoding="utf-8")
+    temporary.replace(path)
+
+
+def is_cuda_oom_error(exc: Exception) -> bool:
+    if isinstance(exc, ModelOutOfMemoryError):
+        return True
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return "outofmemory" in name or "cuda out of memory" in message
 
 
 def append_jsonl(path: Optional[Path], row: Dict[str, Any]) -> None:
@@ -436,9 +605,11 @@ def read_prompt(path: Path) -> str:
 
 
 def build_user_prompt(extraction_prompt: str, schema_hint: str, chunk: Dict[str, Any]) -> str:
+    metadata = dict(chunk)
+    source_text = str(metadata.pop("text", ""))
     return (
         f"{extraction_prompt}\n\n"
         f"Output schema fields:\n{schema_hint}\n\n"
-        f"Source chunk metadata:\n{json.dumps(chunk, ensure_ascii=False, indent=2)}\n\n"
-        f"Source text:\n{chunk['text']}"
+        f"Source chunk metadata:\n{json.dumps(metadata, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        f"Source text:\n{source_text}"
     )
